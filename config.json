@@ -1,0 +1,9 @@
+{
+  "_comment": "Add/override extension categories here, and glob patterns to exclude from scanning. This file, and file_manager.py itself, are always automatically excluded from being moved - no need to list them.",
+  "categories": {
+    "Screenshots": [".png"]
+  },
+  "exclude": ["*.tmp", "Thumbs.db", "desktop.ini"],
+  "_admin_pin_comment": "CHANGE THIS before relying on it - it's just a sample. Required to use --admin (bulk rename). This is a lightweight deterrent, not real security.",
+  "admin_pin": "admin123"
+}

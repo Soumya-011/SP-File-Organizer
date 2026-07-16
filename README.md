@@ -25,3 +25,48 @@ To run the source code directly, you will need Python installed on your system a
    ```bash
    git clone [https://github.com/Soumya-011/SP-File-Organizer.git](https://github.com/Soumya-011/SP-File-Organizer.git)
    cd File-Organizer
+
+Create a Virtual Environment:
+
+Bash
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# Mac/Linux:
+source venv/bin/activate
+Install Dependencies:
+
+Bash
+pip install eel pillow pyinstaller
+Run the Application:
+
+Bash
+python file_manager.py
+📦 Building the Standalone Executable
+You can compile this project into a standalone .exe (Windows) or .app (Mac) that requires zero installation for the end user.
+
+Make sure your virtual environment is active, then run:
+
+Bash
+# Windows
+python -m pyinstaller --onefile --noconsole --name "FileOrganizer" --icon="web/icon.ico" --add-data "web;web" file_manager.py
+
+# Mac/Linux
+python3 -m pyinstaller --onefile --noconsole --name "FileOrganizer" --icon="web/icon.icns" --add-data "web:web" file_manager.py
+Note: Your compiled executable will be located in the dist/ folder. Ensure you place a copy of config.json in the same directory as the executable before running it!
+
+🏗️ Architecture
+The codebase maintains a strict decoupling between the logical backend engines and the web UI front-end.
+
+gui.py: The Eel WebSocket bridge and asynchronous execution controller.
+
+organizer.py / rename.py: Handles move-plan building, category sorting, and regex renaming.
+
+duplicates.py / image_duplicates.py: The multi-threaded hashing and visual similarity engines.
+
+undo.py / recycle_bin.py: The transactional logging and recovery ecosystem.
+
+web/: Contains the pure HTML/CSS/JS interface injected into the Chromium app window.
+
+📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.   

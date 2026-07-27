@@ -5,7 +5,7 @@
 
 let currentCategoriesMap = [];
 let activeScanType = "exact";
-let currentRenameCategory = null; // OPTIMIZED: Replaced array with a single string
+let currentRenameCategory = null; 
 
 // Global State Caching for Clean Array Pathing & Modal Navigations
 window.currentDuplicateGroups = [];
@@ -109,7 +109,6 @@ function initAdminAndRenameHandlers() {
 
     document.getElementById("submit-pin-btn").addEventListener("click", () => handleAuth("admin-pin-input"));
     
-    // Bind the auth check to the new Categories panel input
     const catBtn = document.getElementById("cat-submit-pin-btn");
     if(catBtn) catBtn.addEventListener("click", () => handleAuth("cat-admin-pin-input"));
 
@@ -125,14 +124,12 @@ function initAdminAndRenameHandlers() {
         if (op === "suffix") l1.innerText = "Text to add as suffix";
     });
 
-    // OPTIMIZED LISTENER: Just saves the category string
     document.getElementById("rename-category-select").addEventListener("change", async (e) => {
         currentRenameCategory = e.target.value; 
         document.getElementById("rename-preview-list").innerHTML = "<li>Category loaded. Select parameters and click preview...</li>";
         document.getElementById("apply-rename-btn").disabled = true;
     });
 
-    // OPTIMIZED PREVIEW LISTENER
     document.getElementById("preview-rename-btn").addEventListener("click", async () => {
         const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
@@ -140,12 +137,8 @@ function initAdminAndRenameHandlers() {
         
         if (!arg1 && op !== "replace") return alert("Please enter text argument");
         if (!currentRenameCategory) return alert("No category selected");
-
-        window.showLoader("Generating text preview...");
         
-        // Pass the string name, NOT an array of files
         const changed = await eel.preview_rename(currentRenameCategory, op, arg1, arg2)();
-        window.hideLoader();
 
         const list = document.getElementById("rename-preview-list");
         list.innerHTML = "";
@@ -163,15 +156,11 @@ function initAdminAndRenameHandlers() {
         }
     });
 
-    // OPTIMIZED APPLY LISTENER
     document.getElementById("apply-rename-btn").addEventListener("click", async () => {
         const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
         
-        window.showLoader("Applying bulk rename...");
-        
-        // Pass the string name, NOT an array of files
         const count = await eel.execute_rename(currentRenameCategory, op, arg1, arg2)();
         
         document.getElementById("rename-preview-list").innerHTML = "<li>Select parameters and click preview...</li>";
@@ -197,7 +186,6 @@ function unlockAdminUI() {
     populateRenameCategories();
 }
 
-// OPTIMIZED POPULATE ROUTINE
 async function populateRenameCategories() {
     const cats = await eel.get_rename_categories()();
     const sel = document.getElementById("rename-category-select");
@@ -209,7 +197,7 @@ async function populateRenameCategories() {
         cats.forEach((c, idx) => {
             const opt = document.createElement("option");
             opt.value = c.name;
-            opt.innerText = `${c.name} (${c.count} files)`; // Used c.count
+            opt.innerText = `${c.name} (${c.count} files)`;
             sel.appendChild(opt);
             if (idx === 0) currentRenameCategory = c.name; 
         });
@@ -275,7 +263,6 @@ async function initApplicationContextData() {
     }
     
     if (metadata.folder) {
-        // ONLY SHOW LOADER ON INITIAL FOLDER LOAD
         window.showLoader("Scanning workspace, please wait...");
         await refreshDashboardTelemetryMetrics();
         window.hideLoader();
@@ -326,7 +313,6 @@ async function refreshDashboardTelemetryMetrics() {
         chartRing.style.background = `conic-gradient(${gradients.join(',')})`;
     }
 
-    // -- POPULATE CATEGORY MATRIX TAB --
     const catData = await eel.get_categories_data()();
     const grid = document.getElementById("categories-grid");
     if (grid) {
@@ -358,7 +344,6 @@ async function refreshDashboardTelemetryMetrics() {
         });
     }
 
-    // --- LOOSE ORGANIZE & MISMATCHES ---
     const mismatches = await eel.get_mismatched_data()();
     const misCard = document.getElementById("mismatch-warning-card");
     if (misCard) {
@@ -399,73 +384,83 @@ async function refreshDashboardTelemetryMetrics() {
     }
     triggerRuleLivePreviews();
 
-// --- DUPLICATES ---
-    const thresholdVal = document.getElementById("similarity-select").value;
-    const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal)();
-    
-    // Extract the paginated array from our new response object
-    const dupGroups = dupResponse.displayed_groups || [];
-    window.currentDuplicateGroups = dupGroups; 
-    
-    const dupSelectAllBtn = document.getElementById("dup-select-all");
-    if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
-
-    const dupContainer = document.getElementById("duplicates-render-container");
-    if (dupContainer) {
-        dupContainer.innerHTML = "";
+    // --- DUPLICATES (SMART LOADING) ---
+    // Optimization: Only load duplicates if the user is actually looking at the Duplicate tab!
+    const activePanel = document.querySelector(".view-panel.active-view");
+    if (activePanel && activePanel.id === "duplicates-panel") {
         
-        // PERFORMANCE FIX: Show a warning banner if we hit the 50-item limit cap
-        if (dupResponse.total_groups > dupGroups.length) {
-            dupContainer.innerHTML += `
-                <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
-                    <b>High Volume Detected:</b> Found ${dupResponse.total_groups.toLocaleString()} duplicate sets. To prevent UI freezing, only the first ${dupGroups.length} are shown. Purge these to automatically load the next batch!
-                </div>
-            `;
-        }
-
-        if (dupGroups.length === 0) {
-            dupContainer.innerHTML += '<p style="color:var(--text-secondary); font-size:13.5px;">No duplicate elements detected.</p>';
+        if (activeScanType === "similar") {
+            window.showLoader("Analyzing images for visual matches. This takes ~60-90 seconds for large folders...");
         } else {
-            dupGroups.forEach((group, gIdx) => {
-                const groupWrapper = document.createElement("div");
-                groupWrapper.style.padding = "16px";
-                groupWrapper.style.border = "1px solid var(--stroke-color)";
-                groupWrapper.style.borderRadius = "8px";
-                groupWrapper.style.marginBottom = "16px";
-                groupWrapper.style.backgroundColor = "#fff";
-                
-                let itemsListHtml = "";
-                group.files.forEach((file, fIdx) => {
-                    const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
-                    
-                    let mediaThumbnailHtml = `
-                        <div style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3;">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-                        </div>`;
-                        
-                    if (file.thumb_b64) {
-                        mediaThumbnailHtml = `<img src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" style="cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;" title="Click for full preview" />`;
-                    }
-
-                    itemsListHtml += `
-                        <div class="dup-row" style="display:flex; align-items:center; gap:12px; padding:12px 6px; border-bottom:1px solid var(--stroke-color);">
-                            <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked} style="width:16px; height:16px;">
-                            ${mediaThumbnailHtml}
-                            <div class="dup-info">
-                                <b style="font-size:13px; display:block; color:var(--text-primary); word-break:break-all;">${file.name}</b>
-                                <span style="font-size:11.5px; color:var(--text-secondary); word-break:break-all;">${file.path}</span>
-                            </div>
-                        </div>
-                    `;
-                });
-
-                groupWrapper.innerHTML = `
-                    <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Set Match Collection — ${group.size_str} copies each</div>
-                    <div style="display:flex; flex-direction:column;">${itemsListHtml}</div>
-                `;
-                dupContainer.appendChild(groupWrapper);
-            });
+            window.showLoader("Scanning exact duplicates...");
         }
+
+        const thresholdVal = document.getElementById("similarity-select").value;
+        const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal)();
+        
+        const dupGroups = dupResponse.displayed_groups || [];
+        window.currentDuplicateGroups = dupGroups; 
+        
+        const dupSelectAllBtn = document.getElementById("dup-select-all");
+        if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
+
+        const dupContainer = document.getElementById("duplicates-render-container");
+        if (dupContainer) {
+            dupContainer.innerHTML = "";
+            
+            if (dupResponse.total_groups > dupGroups.length) {
+                dupContainer.innerHTML += `
+                    <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
+                        <b>High Volume Detected:</b> Found ${dupResponse.total_groups.toLocaleString()} duplicate sets. To prevent UI freezing, only the first ${dupGroups.length} are shown. Purge these to automatically load the next batch!
+                    </div>
+                `;
+            }
+
+            if (dupGroups.length === 0) {
+                dupContainer.innerHTML += '<p style="color:var(--text-secondary); font-size:13.5px;">No duplicate elements detected.</p>';
+            } else {
+                dupGroups.forEach((group, gIdx) => {
+                    const groupWrapper = document.createElement("div");
+                    groupWrapper.style.padding = "16px";
+                    groupWrapper.style.border = "1px solid var(--stroke-color)";
+                    groupWrapper.style.borderRadius = "8px";
+                    groupWrapper.style.marginBottom = "16px";
+                    groupWrapper.style.backgroundColor = "#fff";
+                    
+                    let itemsListHtml = "";
+                    group.files.forEach((file, fIdx) => {
+                        const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
+                        
+                        let mediaThumbnailHtml = `
+                            <div style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3;">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                            </div>`;
+                            
+                        if (file.thumb_b64) {
+                            mediaThumbnailHtml = `<img src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" style="cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;" title="Click for full preview" />`;
+                        }
+
+                        itemsListHtml += `
+                            <div class="dup-row" style="display:flex; align-items:center; gap:12px; padding:12px 6px; border-bottom:1px solid var(--stroke-color);">
+                                <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked} style="width:16px; height:16px;">
+                                ${mediaThumbnailHtml}
+                                <div class="dup-info">
+                                    <b style="font-size:13px; display:block; color:var(--text-primary); word-break:break-all;">${file.name}</b>
+                                    <span style="font-size:11.5px; color:var(--text-secondary); word-break:break-all;">${file.path}</span>
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    groupWrapper.innerHTML = `
+                        <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Set Match Collection — ${group.size_str} copies each</div>
+                        <div style="display:flex; flex-direction:column;">${itemsListHtml}</div>
+                    `;
+                    dupContainer.appendChild(groupWrapper);
+                });
+            }
+        }
+        window.hideLoader();
     }
 
     // --- HISTORY AND RECOVERY BIN ---
@@ -507,7 +502,6 @@ async function refreshDashboardTelemetryMetrics() {
 }
 
 function initInteractivityHandlers() {
-    // Nav Click Routings For Dashboard Tiles
     document.getElementById("metric-total-files").addEventListener("click", () => {
         document.querySelector('.nav-btn[data-target="organize-panel"]').click();
     });
@@ -518,7 +512,6 @@ function initInteractivityHandlers() {
         document.querySelector('.nav-btn[data-target="bin-panel"]').click();
     });
 
-    // Mismatch File Modals Trigger Logic
     document.getElementById("fix-mismatch-btn").addEventListener("click", () => {
         const targets = new Set(window.currentMismatches.map(m => m.correct));
         const container = document.getElementById("mismatch-checklist");
@@ -540,20 +533,14 @@ function initInteractivityHandlers() {
         if(selected.length === 0) return alert("Select at least one category to fix.");
 
         const count = await eel.fix_mismatched_files(selected)();
-        
         document.getElementById("mismatch-modal").style.display = "none";
         await refreshDashboardTelemetryMetrics();
         setTimeout(() => alert(`Fixed ${count} misplaced files inside target directories.`), 10);
     });
 
-    // WORKSPACE VACUUM TRIGGER
     document.getElementById("vacuum-btn").addEventListener("click", async () => {
         const emptyFolders = await eel.get_empty_folders_data()();
-        
-        if (emptyFolders.length === 0) {
-            alert("No empty folders found natively inside the current workspace.");
-            return;
-        }
+        if (emptyFolders.length === 0) return alert("No empty folders found natively inside the current workspace.");
         
         const container = document.getElementById("vacuum-checklist");
         container.innerHTML = "";
@@ -597,12 +584,9 @@ function initInteractivityHandlers() {
         const res = await eel.select_folder_native()();
         if (res.status === "success") {
             document.getElementById("current-path-display").innerText = res.path;
-            
-            // ONLY SHOW LOADER ON NEW FOLDER LOAD
             window.showLoader("Scanning new workspace, please wait...");
             await refreshDashboardTelemetryMetrics();
             window.hideLoader();
-            
             if (document.getElementById("rename-workspace-section").style.display === "block") populateRenameCategories();
         }
     });

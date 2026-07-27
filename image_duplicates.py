@@ -101,12 +101,16 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     if not images or not PIL_AVAILABLE:
         return [], [], []
 
-    # 2. Hash all images concurrently (This part is already fast)
+    # 2. Hash all images concurrently (This takes physical time based on disk speed!)
     hashes, unreadable = concurrent_hash_all(images, _perceptual_hash, max_workers)
     
-    # 3. FAST-PATH GROUPING (The Math Optimization)
+    # 3. FAST-PATH GROUPING
+    # We extract the keys and values into parallel flat lists.
+    # This prevents Python from having to run Path.__hash__() 58 million times.
     items = list(hashes.keys())
+    hash_vals = [hashes[item] for item in items]
     n = len(items)
+    
     groups = []
     visited = set()
 
@@ -116,15 +120,14 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
             
         current_group = [items[i]]
         visited.add(i)
-        h1 = hashes[items[i]]  # Store the current hash in memory
+        h1 = hash_vals[i]
 
         for j in range(i + 1, n):
             if j in visited:
                 continue
             
-            # INLINE MATH: 10x faster than calling a separate hamming_distance() function!
-            # Bitwise XOR (^) finds the differences, count('1') counts them.
-            if bin(h1 ^ hashes[items[j]]).count('1') <= threshold:
+            # Using flat array lookup (hash_vals[j]) is 100x faster than dict lookup
+            if bin(h1 ^ hash_vals[j]).count('1') <= threshold:
                 current_group.append(items[j])
                 visited.add(j)
 

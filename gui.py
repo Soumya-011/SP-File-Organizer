@@ -46,8 +46,22 @@ APP_STATE = {
     "exclude_patterns": [],
     "admin_pin": None,
     "admin_mode": False,
-    "ext_to_category": {}
+    "ext_to_category": {},
+    "cached_files": None,
+    "cached_categories": None 
 }
+
+def get_cached_scan():
+    """Returns cached files instantly if already scanned, otherwise does a fast scan."""
+    if APP_STATE["cached_files"] is None:
+        folder = APP_STATE["folder"]
+        all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
+        files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
+        
+        APP_STATE["cached_files"] = all_files
+        APP_STATE["cached_categories"] = files_by_cat
+        
+    return APP_STATE["cached_files"], APP_STATE["cached_categories"]
 
 def _generate_base64_thumb(file_path: Path):
     if not PIL_AVAILABLE or not is_image_file(file_path):
@@ -123,19 +137,24 @@ def execute_storage_telemetry():
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir():
         return {"error": "No directory context set"}
-    all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
+        
+    # USE THE CACHE HERE!
+    all_files, files_by_category = get_cached_scan()
+    
     if not all_files:
         return {"total_size_str": "0 B", "total_files": 0, "duplicate_sets": 0, "trash_count": 0, "categories": []}
-    files_by_category, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
+        
     duplicate_groups, _ = find_duplicates(all_files)
     sizes = compute_storage_usage(files_by_category)
     total_bytes = sum(sizes.values())
     categories_data = []
+    
     for cat, byte_size in sizes.items():
         pct = int((byte_size / total_bytes * 100)) if total_bytes > 0 else 0
         categories_data.append({
             "name": cat, "size_str": format_size(byte_size), "bytes": byte_size, "percentage": pct
         })
+        
     return {
         "total_size_str": format_size(total_bytes), "total_files": len(all_files),
         "duplicate_sets": len(duplicate_groups), "trash_count": len(list_trash_items(folder)),
@@ -144,11 +163,20 @@ def execute_storage_telemetry():
 
 @eel.expose
 def get_organize_view_data():
-    folder = APP_STATE["folder"]
-    if not folder or not folder.is_dir():
+    """Returns only names and counts, saving massive WebSocket transfer time."""
+    if not APP_STATE["folder"]:
         return []
-    files_by_category, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
-    return [{"name": c, "count": len(flist)} for c, flist in files_by_category.items() if flist]
+        
+    _, files_by_category = get_cached_scan()
+    
+    # We only send a tiny list of names and counts (a few bytes) to JS
+    # Instead of sending the actual file paths!
+    summary = []
+    for cat_name, file_list in files_by_category.items():
+        if file_list:
+            summary.append({"name": cat_name, "count": len(file_list)})
+            
+    return summary
 
 @eel.expose
 def get_empty_folders_data():
@@ -286,6 +314,8 @@ def trigger_bulk_organization(chosen_categories):
         _, _, entries = move_files(files, dest, dry_run=False)
         run_log.extend(entries)
     if run_log: save_run_log(folder, run_log)
+    APP_STATE["cached_files"] = None
+    APP_STATE["cached_categories"] = None
     return {"status": "success", "moved": len(run_log)}
 
 @eel.expose
@@ -311,6 +341,8 @@ def trigger_separation_organization(rule_type, timing, limit_value):
         run_log = execute_plan(plan, dry_run=False, label="Post-Separation")
 
     if run_log: save_run_log(folder, run_log)
+    APP_STATE["cached_files"] = None
+    APP_STATE["cached_categories"] = None
     return {"status": "success", "moved": len(run_log)}
 
 @eel.expose
@@ -410,6 +442,8 @@ def execute_rename(file_paths, op, arg1, arg2):
     plan = build_rename_plan(paths, rule)
     log_entries = execute_rename_plan(plan, dry_run=False)
     if log_entries: save_run_log(APP_STATE["folder"], log_entries)
+    APP_STATE["cached_files"] = None
+    APP_STATE["cached_categories"] = None
     return len(log_entries)
 
 @eel.expose

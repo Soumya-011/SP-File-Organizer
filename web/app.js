@@ -141,9 +141,7 @@ function initAdminAndRenameHandlers() {
         if (!arg1 && op !== "replace") return alert("Please enter text argument");
         if (currentRenameFiles.length === 0) return alert("No files in category");
 
-        window.showLoader("Generating text preview...");
         const changed = await eel.preview_rename(currentRenameFiles, op, arg1, arg2)();
-        window.hideLoader();
 
         const list = document.getElementById("rename-preview-list");
         list.innerHTML = "";
@@ -163,7 +161,6 @@ function initAdminAndRenameHandlers() {
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
         
-        window.showLoader("Applying bulk rename...");
         const count = await eel.execute_rename(currentRenameFiles, op, arg1, arg2)();
         
         document.getElementById("rename-preview-list").innerHTML = "<li>Select parameters and click preview...</li>";
@@ -221,13 +218,11 @@ function initCategoryHandlers() {
         const exts = document.getElementById("cat-exts-input").value.trim();
         if(!name || !exts) return alert("Category Name and Extensions are required fields.");
         
-        window.showLoader("Saving mapping data...");
         const res = await eel.update_category(name, exts)();
         if(res.status === "success") {
             document.getElementById("category-modal").style.display = "none";
             await refreshDashboardTelemetryMetrics();
         } else {
-            window.hideLoader();
             alert(res.message);
         }
     });
@@ -243,7 +238,6 @@ window.editCategory = function(name, exts) {
 
 window.deleteCategory = async function(name) {
     if(confirm(`Are you sure you want to remove custom config overrides for '${name}'?`)) {
-        window.showLoader("Removing custom configurations...");
         await eel.remove_category(name)();
         await refreshDashboardTelemetryMetrics();
     }
@@ -269,7 +263,10 @@ async function initApplicationContextData() {
     }
     
     if (metadata.folder) {
-        refreshDashboardTelemetryMetrics();
+        // ONLY SHOW LOADER ON INITIAL FOLDER LOAD
+        window.showLoader("Scanning workspace, please wait...");
+        await refreshDashboardTelemetryMetrics();
+        window.hideLoader();
     }
 }
 
@@ -287,14 +284,9 @@ async function triggerRuleLivePreviews() {
 async function refreshDashboardTelemetryMetrics() {
     if (typeof eel === "undefined") return;
     
-    window.showLoader("Scanning workspace, please wait...");
-
     // --- TELEMETRY AND CATEGORY RENDERING ---
     const data = await eel.execute_storage_telemetry()();
-    if (data.error) {
-        window.hideLoader();
-        return;
-    }
+    if (data.error) return;
 
     document.getElementById("count-total-files").innerText = (data.total_files || 0).toLocaleString();
     document.getElementById("count-dup-sets").innerText = (data.duplicate_sets || 0).toLocaleString();
@@ -487,9 +479,6 @@ async function refreshDashboardTelemetryMetrics() {
             });
         }
     }
-    
-    // Scan Complete, UI built. Drop the loader.
-    window.hideLoader();
 }
 
 function initInteractivityHandlers() {
@@ -525,7 +514,6 @@ function initInteractivityHandlers() {
         const selected = Array.from(document.querySelectorAll(".mismatch-cat-checkbox:checked")).map(cb => cb.value);
         if(selected.length === 0) return alert("Select at least one category to fix.");
 
-        window.showLoader("Moving files...");
         const count = await eel.fix_mismatched_files(selected)();
         
         document.getElementById("mismatch-modal").style.display = "none";
@@ -535,9 +523,7 @@ function initInteractivityHandlers() {
 
     // WORKSPACE VACUUM TRIGGER
     document.getElementById("vacuum-btn").addEventListener("click", async () => {
-        window.showLoader("Looking for empty directories...");
         const emptyFolders = await eel.get_empty_folders_data()();
-        window.hideLoader();
         
         if (emptyFolders.length === 0) {
             alert("No empty folders found natively inside the current workspace.");
@@ -572,14 +558,12 @@ function initInteractivityHandlers() {
         const selected = Array.from(document.querySelectorAll(".vacuum-folder-checkbox:checked")).map(cb => cb.value);
         if(selected.length === 0) return alert("Select at least one empty folder to clean.");
 
-        window.showLoader("Sweeping empty folders...");
         const res = await eel.purge_selected_empty_folders(selected)();
         if(res.status === "success") {
             document.getElementById("vacuum-modal").style.display = "none";
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`), 10);
         } else {
-            window.hideLoader();
             alert(res.message || "Error cleaning folders.");
         }
     });
@@ -588,7 +572,12 @@ function initInteractivityHandlers() {
         const res = await eel.select_folder_native()();
         if (res.status === "success") {
             document.getElementById("current-path-display").innerText = res.path;
-            refreshDashboardTelemetryMetrics();
+            
+            // ONLY SHOW LOADER ON NEW FOLDER LOAD
+            window.showLoader("Scanning new workspace, please wait...");
+            await refreshDashboardTelemetryMetrics();
+            window.hideLoader();
+            
             if (document.getElementById("rename-workspace-section").style.display === "block") populateRenameCategories();
         }
     });
@@ -608,13 +597,11 @@ function initInteractivityHandlers() {
         });
         if (targets.length === 0) return alert("Select at least one category checkbox.");
         
-        window.showLoader("Organizing files into structures...");
         const res = await eel.trigger_bulk_organization(targets)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Execution complete. Reorganized ${res.moved} items into folders.`), 10);
         } else {
-            window.hideLoader();
             alert(res.message);
         }
     });
@@ -623,13 +610,11 @@ function initInteractivityHandlers() {
         const val = document.getElementById("size-input-value").value;
         const timing = document.querySelector('input[name="size-timing"]:checked').value;
         
-        window.showLoader("Processing large files...");
         const res = await eel.trigger_separation_organization("size", timing, val)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Size organization sequence resolved. Isolated ${res.moved} files.`), 10);
         } else {
-            window.hideLoader();
             alert(res.message);
         }
     });
@@ -638,13 +623,11 @@ function initInteractivityHandlers() {
         const val = document.getElementById("age-input-value").value;
         const timing = document.querySelector('input[name="age-timing"]:checked').value;
         
-        window.showLoader("Processing historical files...");
         const res = await eel.trigger_separation_organization("age", timing, val)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Age organization sequence resolved. Isolated ${res.moved} files.`), 10);
         } else {
-            window.hideLoader();
             alert(res.message);
         }
     });
@@ -670,13 +653,11 @@ function initInteractivityHandlers() {
         });
         if (targets.length === 0) return alert("No items selected for cleanup.");
         if (confirm(`Move these ${targets.length} duplicate file(s) into the recovery bin?`)) {
-            window.showLoader("Moving duplicates to Recovery Bin...");
             const res = await eel.purge_selected_duplicates(targets)();
             if (res.status === "success") {
                 await refreshDashboardTelemetryMetrics();
                 setTimeout(() => alert(`Asset cleanups processed successfully.`), 10);
             } else {
-                window.hideLoader();
                 alert(res.message);
             }
         }
@@ -692,20 +673,17 @@ function initInteractivityHandlers() {
         });
         if (targets.length === 0) return alert("Select files using the checkboxes first.");
         
-        window.showLoader("Restoring files to original destinations...");
         const res = await eel.restore_from_bin(targets)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Successfully restored ${res.restored} item(s) back to original locations.`), 10);
         } else {
-            window.hideLoader();
             alert(res.message);
         }
     });
 
     document.getElementById("empty-bin-btn").addEventListener("click", async () => {
         if (confirm("Attention! This action completely flushes your hidden recovery files permanently from disk memory. Proceed?")) {
-            window.showLoader("Securely deleting trash logs...");
             const res = await eel.empty_trash_completely()();
             await refreshDashboardTelemetryMetrics();
             setTimeout(() => alert(`Trash directory cleared completely. Purged ${res.flushed} system files permanently.`), 10);
@@ -759,7 +737,6 @@ document.addEventListener("keydown", (e) => {
 
 window.triggerUndoSequence = async function(logPathString) {
     if (confirm("Reverse adjustments logged inside this execution batch?")) {
-        window.showLoader("Reversing operations...");
         const res = await eel.execute_undo_operation(logPathString)();
         await refreshDashboardTelemetryMetrics();
         setTimeout(() => alert(`Filesystem adjustments reversed safely. Restored ${res.restored} items.`), 10);

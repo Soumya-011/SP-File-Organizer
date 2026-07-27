@@ -1,0 +1,11 @@
+# Web GUI Framework
+Eel
+
+# Image Processing (Thumbnails & Visual Duplicate Hashing)
+Pillow
+
+# Executable Compiler
+pyinstaller
+
+# Required by Eel for modern Python environments (3.12+)
+setuptools

@@ -61,7 +61,7 @@ def get_file_age_days(path: Path) -> float:
     return (datetime.now().timestamp() - mtime) / 86400
 
 
-def file_hash(path: Path, chunk_size: int = 65536) -> str:
+def file_hash(path: Path, chunk_size=1048576) -> str:
     h = hashlib.blake2b(digest_size=16)
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(chunk_size), b""):
@@ -69,7 +69,7 @@ def file_hash(path: Path, chunk_size: int = 65536) -> str:
     return h.hexdigest()
 
 
-def partial_hash(path: Path, read_size: int = 4096) -> str:
+def partial_hash(path: Path, chunk_size=1048576) -> str:
     """
     Hash of just the first `read_size` bytes. Used as a cheap prefilter
     before file_hash(): two files can only be true duplicates if their
@@ -81,7 +81,7 @@ def partial_hash(path: Path, read_size: int = 4096) -> str:
     """
     h = hashlib.blake2b(digest_size=16)
     with open(path, "rb") as f:
-        h.update(f.read(read_size))
+        h.update(f.read(chunk_size))
     return h.hexdigest()
 
 

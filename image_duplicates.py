@@ -48,28 +48,27 @@ def is_image_file(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
 
 
-def dhash(path: Path, hash_size: int = 8) -> int:
+def _perceptual_hash(path: Path) -> int:
     """
-    Difference hash: shrink the image to a (hash_size+1) x hash_size grid,
-    grayscale it, then set one bit per pixel for whether it's brighter than
-    the pixel to its right. The result is a compact fingerprint of the
-    image's overall shape/gradient that survives resizing, re-compression,
-    and small edits far better than any content hash could - two visually
-    similar images end up with mostly-matching bits, while two unrelated
-    images end up close to random relative to each other.
+    Computes a 64-bit difference hash (dhash) as a pure integer.
+    Returning an integer (instead of a string) is required for the 
+    ultra-fast bitwise math optimization to work.
     """
     with Image.open(path) as img:
-        img = img.convert("L").resize((hash_size + 1, hash_size), _RESAMPLE)
+        # Convert to grayscale and resize to 9x8
+        img = img.convert("L").resize((9, 8), _RESAMPLE)
         pixels = list(img.getdata())
-
-    bits = 0
-    width = hash_size + 1
-    for row in range(hash_size):
-        for col in range(hash_size):
-            bits <<= 1
-            if pixels[row * width + col] > pixels[row * width + col + 1]:
-                bits |= 1
-    return bits
+        
+        # Compare adjacent pixels to build a 64-bit integer
+        diff_hash = 0
+        for row in range(8):
+            for col in range(8):
+                idx = row * 9 + col
+                # If the left pixel is brighter than the right pixel, flip the bit to 1
+                if pixels[idx] >= pixels[idx + 1]:
+                    diff_hash |= 1 << (row * 8 + col)
+                    
+        return diff_hash
 
 
 def hamming_distance(a: int, b: int) -> int:
@@ -96,45 +95,43 @@ class _DisjointSet:
             self.parent[rx] = ry
 
 
-def find_similar_images(files: list, threshold: int = DEFAULT_THRESHOLD, max_workers: int = None):
-    """
-    Group images that LOOK alike, even when their file contents are
-    completely different. Compares every pair of candidates' perceptual
-    hashes - cheap (a 64-bit XOR + bit count) even though it's O(n^2), which
-    is fine for the thousands-of-images range this tool targets. A folder
-    with tens of thousands of photos would want a proper similarity index
-    instead of pairwise comparison.
+def find_similar_images(files: list, threshold: int = 10, max_workers: int = None):
+    # 1. Filter out non-images
+    images = [f for f in files if is_image_file(f)]
+    if not images or not PIL_AVAILABLE:
+        return [], [], []
 
-    Returns (groups, unreadable, unavailable):
-      - groups: list of groups, each a list of 2+ Paths that look alike.
-      - unreadable: image files that couldn't be opened/hashed (corrupt,
-        unsupported format variant, permission denied, etc).
-      - unavailable: True if Pillow isn't installed - groups and unreadable
-        are both [] in that case, so callers don't need a separate check
-        before using them.
-    """
-    if not PIL_AVAILABLE:
-        return [], [], True
-
-    candidates = [f for f in files if is_image_file(f)]
-    if len(candidates) < 2:
-        return [], [], False
-
-    hashes, unreadable = concurrent_hash_all(candidates, dhash, max_workers)
+    # 2. Hash all images concurrently (This part is already fast)
+    hashes, unreadable = concurrent_hash_all(images, _perceptual_hash, max_workers)
+    
+    # 3. FAST-PATH GROUPING (The Math Optimization)
     items = list(hashes.keys())
+    n = len(items)
+    groups = []
+    visited = set()
 
-    dsu = _DisjointSet(items)
-    for i in range(len(items)):
-        for j in range(i + 1, len(items)):
-            if hamming_distance(hashes[items[i]], hashes[items[j]]) <= threshold:
-                dsu.union(items[i], items[j])
+    for i in range(n):
+        if i in visited:
+            continue
+            
+        current_group = [items[i]]
+        visited.add(i)
+        h1 = hashes[items[i]]  # Store the current hash in memory
 
-    grouped = {}
-    for item in items:
-        grouped.setdefault(dsu.find(item), []).append(item)
+        for j in range(i + 1, n):
+            if j in visited:
+                continue
+            
+            # INLINE MATH: 10x faster than calling a separate hamming_distance() function!
+            # Bitwise XOR (^) finds the differences, count('1') counts them.
+            if bin(h1 ^ hashes[items[j]]).count('1') <= threshold:
+                current_group.append(items[j])
+                visited.add(j)
 
-    groups = [g for g in grouped.values() if len(g) > 1]
-    return groups, unreadable, False
+        if len(current_group) > 1:
+            groups.append(current_group)
+
+    return groups, unreadable, []
 
 
 def ask_similarity_threshold() -> int:

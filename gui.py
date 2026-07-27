@@ -47,21 +47,40 @@ APP_STATE = {
     "admin_pin": None,
     "admin_mode": False,
     "ext_to_category": {},
+    
+    # ----------------------------------------------------
+    # Optimization: In-Memory Scans
+    # ----------------------------------------------------
     "cached_files": None,
-    "cached_categories": None 
+    "cached_categories": None,
+    "cached_loose_categories": None
 }
 
-def get_cached_scan():
+def clear_cache():
+    """Wipes the cached memory so the next action triggers a fresh scan."""
+    APP_STATE["cached_files"] = None
+    APP_STATE["cached_categories"] = None
+    APP_STATE["cached_loose_categories"] = None
+
+def get_cached_scans():
     """Returns cached files instantly if already scanned, otherwise does a fast scan."""
     if APP_STATE["cached_files"] is None:
         folder = APP_STATE["folder"]
-        all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
-        files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
-        
-        APP_STATE["cached_files"] = all_files
-        APP_STATE["cached_categories"] = files_by_cat
-        
-    return APP_STATE["cached_files"], APP_STATE["cached_categories"]
+        if folder and folder.is_dir():
+            # 1. Recursive Scan (for Dashboard & Duplicates)
+            all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
+            all_files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
+            
+            # 2. Top-Level Scan (for Organize tab)
+            loose_files_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+            
+            APP_STATE["cached_files"] = all_files
+            APP_STATE["cached_categories"] = all_files_by_cat
+            APP_STATE["cached_loose_categories"] = loose_files_by_cat
+        else:
+            return [], {}, {}
+            
+    return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
 
 def _generate_base64_thumb(file_path: Path):
     if not PIL_AVAILABLE or not is_image_file(file_path):
@@ -104,6 +123,7 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
     APP_STATE["exclude_patterns"] = excludes
     APP_STATE["admin_pin"] = pin
     APP_STATE["ext_to_category"] = build_ext_to_category(cmap)
+    clear_cache()
 
 @eel.expose
 def get_system_metadata():
@@ -129,6 +149,7 @@ def select_folder_native():
     root.destroy()
     if chosen:
         APP_STATE["folder"] = Path(chosen)
+        clear_cache()
         return {"status": "success", "path": chosen}
     return {"status": "cancelled"}
 
@@ -138,8 +159,8 @@ def execute_storage_telemetry():
     if not folder or not folder.is_dir():
         return {"error": "No directory context set"}
         
-    # USE THE CACHE HERE!
-    all_files, files_by_category = get_cached_scan()
+    # Leverages memory buffer
+    all_files, files_by_category, _ = get_cached_scans()
     
     if not all_files:
         return {"total_size_str": "0 B", "total_files": 0, "duplicate_sets": 0, "trash_count": 0, "categories": []}
@@ -163,16 +184,15 @@ def execute_storage_telemetry():
 
 @eel.expose
 def get_organize_view_data():
-    """Returns only names and counts, saving massive WebSocket transfer time."""
-    if not APP_STATE["folder"]:
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir():
         return []
         
-    _, files_by_category = get_cached_scan()
+    # Extracts specifically loose files instantly from memory
+    _, _, loose_files_by_category = get_cached_scans()
     
-    # We only send a tiny list of names and counts (a few bytes) to JS
-    # Instead of sending the actual file paths!
     summary = []
-    for cat_name, file_list in files_by_category.items():
+    for cat_name, file_list in loose_files_by_category.items():
         if file_list:
             summary.append({"name": cat_name, "count": len(file_list)})
             
@@ -246,6 +266,7 @@ def purge_selected_empty_folders(folder_paths):
             
     if log_entries:
         save_run_log(folder, log_entries)
+        clear_cache()
         
     return {"status": "success", "purged": moved}
 
@@ -274,14 +295,17 @@ def fix_mismatched_files(selected_targets=None):
     if not grouped: return 0
     plan = [(name, folder / name, files) for name, files in grouped.items()]
     run_log = execute_plan(plan, dry_run=False, label="Fixing misplaced files")
-    if run_log: save_run_log(folder, run_log)
+    if run_log: 
+        save_run_log(folder, run_log)
+        clear_cache()
     return len(run_log)
 
 @eel.expose
 def get_rule_preview_metrics(rule_type, limit_value):
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir(): return {"count": 0, "size_str": "0 B"}
-    all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
+    
+    all_files, _, _ = get_cached_scans()
     matched_count = matched_bytes = 0
     val = float(limit_value)
 
@@ -302,20 +326,23 @@ def trigger_bulk_organization(chosen_categories):
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir():
         return {"status": "error", "message": "No workspace folder selected"}
-    files_by_category, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+        
+    _, _, loose_files_by_category = get_cached_scans()
     
     extension_selections = {}
     for category in chosen_categories:
-        extension_selections[category] = files_by_category.get(category, [])
+        extension_selections[category] = loose_files_by_category.get(category, [])
         
-    plan = build_move_plan(folder, files_by_category, chosen_categories, extension_selections=extension_selections)
+    plan = build_move_plan(folder, loose_files_by_category, chosen_categories, extension_selections=extension_selections)
     run_log = []
     for name, dest, files in plan:
         _, _, entries = move_files(files, dest, dry_run=False)
         run_log.extend(entries)
-    if run_log: save_run_log(folder, run_log)
-    APP_STATE["cached_files"] = None
-    APP_STATE["cached_categories"] = None
+    
+    if run_log: 
+        save_run_log(folder, run_log)
+        clear_cache()
+        
     return {"status": "success", "moved": len(run_log)}
 
 @eel.expose
@@ -328,42 +355,60 @@ def trigger_separation_organization(rule_type, timing, limit_value):
         "timing": timing, "want_size": (rule_type == "size"), "want_age": (rule_type == "age"),
         "size_mb": val if rule_type == "size" else None, "age_days": val if rule_type == "age" else None
     }
-    files_by_category, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+    
+    _, _, loose_files_by_category = get_cached_scans()
     run_log = []
 
     if timing == "before":
-        plan, _ = build_pre_plan(files_by_category, folder, rules)
+        plan, _ = build_pre_plan(loose_files_by_category, folder, rules)
         run_log = execute_plan(plan, dry_run=False, label="Pre-Separation")
     else:
         all_categories = list(APP_STATE["category_map"].keys()) + ["Others"]
-        mock_category_plan = [(cat, folder / cat, files_by_category.get(cat, [])) for cat in all_categories]
+        mock_category_plan = [(cat, folder / cat, loose_files_by_category.get(cat, [])) for cat in all_categories]
         plan = build_post_plan(all_categories, mock_category_plan, folder, rules)
         run_log = execute_plan(plan, dry_run=False, label="Post-Separation")
 
-    if run_log: save_run_log(folder, run_log)
-    APP_STATE["cached_files"] = None
-    APP_STATE["cached_categories"] = None
+    if run_log: 
+        save_run_log(folder, run_log)
+        clear_cache()
+        
     return {"status": "success", "moved": len(run_log)}
 
 @eel.expose
 def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10):
     folder = APP_STATE["folder"]
-    if not folder or not folder.is_dir(): return []
-    all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
+    if not folder or not folder.is_dir(): return {"total_groups": 0, "displayed_groups": []}
+    
+    all_files, _, _ = get_cached_scans()
+    
     if scan_type == "exact":
         groups, _ = find_duplicates(all_files)
     else:
         groups, _, _ = find_similar_images(all_files, threshold=int(hamming_threshold))
         
+    # --- PERFORMANCE FIX: TRUNCATE MASSIVE PAYLOADS ---
+    # Generating 1,000+ thumbnails synchronously will freeze the app.
+    # We only process and send the first 50 sets. 
+    max_groups = 50
+    limited_groups = groups[:max_groups]
+        
     formatted_groups = []
-    for idx, group in enumerate(groups):
+    for idx, group in enumerate(limited_groups):
         try: size_str = format_size(group[0].stat().st_size)
         except OSError: size_str = "Unknown"
+        
+        # Also limit to top 10 copies per set just in case a user has 1,000 identical blank files
         files_list = [{
             "name": f.name, "path": str(f), "is_image": is_image_file(f), "thumb_b64": _generate_base64_thumb(f)
-        } for f in group]
+        } for f in group[:10]]
+        
         formatted_groups.append({"id": idx, "size_str": size_str, "files": files_list})
-    return formatted_groups
+        
+    # Return as a dictionary so the frontend knows if there are more batches left
+    return {
+        "total_groups": len(groups),
+        "displayed_groups": formatted_groups
+    }
 
 @eel.expose
 def purge_selected_duplicates(file_paths):
@@ -371,7 +416,9 @@ def purge_selected_duplicates(file_paths):
     files_to_trash = [Path(p) for p in file_paths if Path(p).exists()]
     if not files_to_trash: return {"status": "error", "message": "No files selected"}
     moved, log_entries = move_to_trash(files_to_trash, folder, dry_run=False)
-    if log_entries: save_run_log(folder, log_entries)
+    if log_entries: 
+        save_run_log(folder, log_entries)
+        clear_cache()
     return {"status": "success", "purged": moved}
 
 @eel.expose
@@ -400,6 +447,7 @@ def update_category(name, extensions_str):
     save_raw_config(APP_STATE["config_path"], raw_config)
     APP_STATE["category_map"][name] = exts
     APP_STATE["ext_to_category"] = build_ext_to_category(APP_STATE["category_map"])
+    clear_cache()
     return {"status": "success"}
 
 @eel.expose
@@ -416,34 +464,48 @@ def remove_category(name):
     else:
         APP_STATE["category_map"].pop(name, None)
     APP_STATE["ext_to_category"] = build_ext_to_category(APP_STATE["category_map"])
+    clear_cache()
     return {"status": "success"}
 
 @eel.expose
 def get_rename_categories():
+    """Only return the category names and counts, NEVER the massive file lists."""
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir(): return []
-    all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
-    files_by_category, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
-    return [{"name": c, "files": [str(f) for f in files]} for c, files in files_by_category.items() if files]
+    _, all_files_by_category, _ = get_cached_scans()
+    
+    # Send a tiny summary payload
+    return [{"name": c, "count": len(files)} for c, files in all_files_by_category.items() if files]
 
 @eel.expose
-def preview_rename(file_paths, op, arg1, arg2):
+def preview_rename(category_name, op, arg1, arg2):
+    """Expects a category name instead of a massive list of file paths."""
+    _, all_files_by_category, _ = get_cached_scans()
+    files = all_files_by_category.get(category_name, [])
+    if not files: return []
+    
     rule = (op, arg1) if op in ("remove", "prefix", "suffix") else (op, arg1, arg2)
-    paths = [Path(p) for p in file_paths]
-    plan = build_rename_plan(paths, rule)
+    plan = build_rename_plan(files, rule)
+    
+    # Limit preview to 50 items so we don't overload the WebSocket!
     changed = [{"old": o.name, "new": n.name} for o, n in plan if o.name != n.name]
-    return changed
+    return changed[:50] 
 
 @eel.expose
-def execute_rename(file_paths, op, arg1, arg2):
+def execute_rename(category_name, op, arg1, arg2):
     if not APP_STATE["admin_mode"]: return 0
+    
+    _, all_files_by_category, _ = get_cached_scans()
+    files = all_files_by_category.get(category_name, [])
+    if not files: return 0
+    
     rule = (op, arg1) if op in ("remove", "prefix", "suffix") else (op, arg1, arg2)
-    paths = [Path(p) for p in file_paths]
-    plan = build_rename_plan(paths, rule)
+    plan = build_rename_plan(files, rule)
+    
     log_entries = execute_rename_plan(plan, dry_run=False)
-    if log_entries: save_run_log(APP_STATE["folder"], log_entries)
-    APP_STATE["cached_files"] = None
-    APP_STATE["cached_categories"] = None
+    if log_entries: 
+        save_run_log(APP_STATE["folder"], log_entries)
+        clear_cache()
     return len(log_entries)
 
 @eel.expose
@@ -466,16 +528,20 @@ def restore_from_bin(path_strs):
     for it in targets:
         ok, msg = restore_item(it)
         if ok: restored += 1
+    if restored > 0:
+        clear_cache()
     return {"status": "success", "restored": restored}
 
 @eel.expose
 def execute_undo_operation(log_path_str):
     restored, total = restore_run(Path(log_path_str))
+    clear_cache()
     return {"status": "success", "restored": restored, "total": total}
 
 @eel.expose
 def empty_trash_completely():
     count = empty_trash(APP_STATE["folder"])
+    clear_cache()
     return {"status": "success", "flushed": count}
 
 def launch_gui(config_path: Path, initial_folder: Path = None):

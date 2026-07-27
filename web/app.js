@@ -5,7 +5,7 @@
 
 let currentCategoriesMap = [];
 let activeScanType = "exact";
-let currentRenameFiles = [];
+let currentRenameCategory = null; // OPTIMIZED: Replaced array with a single string
 
 // Global State Caching for Clean Array Pathing & Modal Navigations
 window.currentDuplicateGroups = [];
@@ -125,23 +125,27 @@ function initAdminAndRenameHandlers() {
         if (op === "suffix") l1.innerText = "Text to add as suffix";
     });
 
+    // OPTIMIZED LISTENER: Just saves the category string
     document.getElementById("rename-category-select").addEventListener("change", async (e) => {
-        const cats = await eel.get_rename_categories()();
-        const found = cats.find(c => c.name === e.target.value);
-        currentRenameFiles = found ? found.files : [];
-        document.getElementById("rename-preview-list").innerHTML = "<li>Files loaded. Select parameters and click preview...</li>";
+        currentRenameCategory = e.target.value; 
+        document.getElementById("rename-preview-list").innerHTML = "<li>Category loaded. Select parameters and click preview...</li>";
         document.getElementById("apply-rename-btn").disabled = true;
     });
 
+    // OPTIMIZED PREVIEW LISTENER
     document.getElementById("preview-rename-btn").addEventListener("click", async () => {
         const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
         
         if (!arg1 && op !== "replace") return alert("Please enter text argument");
-        if (currentRenameFiles.length === 0) return alert("No files in category");
+        if (!currentRenameCategory) return alert("No category selected");
 
-        const changed = await eel.preview_rename(currentRenameFiles, op, arg1, arg2)();
+        window.showLoader("Generating text preview...");
+        
+        // Pass the string name, NOT an array of files
+        const changed = await eel.preview_rename(currentRenameCategory, op, arg1, arg2)();
+        window.hideLoader();
 
         const list = document.getElementById("rename-preview-list");
         list.innerHTML = "";
@@ -152,16 +156,23 @@ function initAdminAndRenameHandlers() {
             changed.forEach(item => {
                 list.innerHTML += `<li>${item.old} &nbsp;&rarr;&nbsp; <b style="color:var(--text-primary)">${item.new}</b></li>`;
             });
+            if (changed.length === 50) {
+                list.innerHTML += `<li style="color: var(--status-alert); margin-top: 8px;">...preview limited to 50 items to optimize performance.</li>`;
+            }
             document.getElementById("apply-rename-btn").disabled = false;
         }
     });
 
+    // OPTIMIZED APPLY LISTENER
     document.getElementById("apply-rename-btn").addEventListener("click", async () => {
         const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
         
-        const count = await eel.execute_rename(currentRenameFiles, op, arg1, arg2)();
+        window.showLoader("Applying bulk rename...");
+        
+        // Pass the string name, NOT an array of files
+        const count = await eel.execute_rename(currentRenameCategory, op, arg1, arg2)();
         
         document.getElementById("rename-preview-list").innerHTML = "<li>Select parameters and click preview...</li>";
         document.getElementById("apply-rename-btn").disabled = true;
@@ -186,20 +197,21 @@ function unlockAdminUI() {
     populateRenameCategories();
 }
 
+// OPTIMIZED POPULATE ROUTINE
 async function populateRenameCategories() {
     const cats = await eel.get_rename_categories()();
     const sel = document.getElementById("rename-category-select");
     sel.innerHTML = "";
     if (cats.length === 0) {
         sel.innerHTML = "<option>No categories available</option>";
-        currentRenameFiles = [];
+        currentRenameCategory = null; 
     } else {
         cats.forEach((c, idx) => {
             const opt = document.createElement("option");
             opt.value = c.name;
-            opt.innerText = `${c.name} (${c.files.length} files)`;
+            opt.innerText = `${c.name} (${c.count} files)`; // Used c.count
             sel.appendChild(opt);
-            if (idx === 0) currentRenameFiles = c.files;
+            if (idx === 0) currentRenameCategory = c.name; 
         });
     }
 }
@@ -387,9 +399,12 @@ async function refreshDashboardTelemetryMetrics() {
     }
     triggerRuleLivePreviews();
 
-    // --- DUPLICATES ---
+// --- DUPLICATES ---
     const thresholdVal = document.getElementById("similarity-select").value;
-    const dupGroups = await eel.get_duplicate_groups_data(activeScanType, thresholdVal)();
+    const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal)();
+    
+    // Extract the paginated array from our new response object
+    const dupGroups = dupResponse.displayed_groups || [];
     window.currentDuplicateGroups = dupGroups; 
     
     const dupSelectAllBtn = document.getElementById("dup-select-all");
@@ -398,8 +413,18 @@ async function refreshDashboardTelemetryMetrics() {
     const dupContainer = document.getElementById("duplicates-render-container");
     if (dupContainer) {
         dupContainer.innerHTML = "";
+        
+        // PERFORMANCE FIX: Show a warning banner if we hit the 50-item limit cap
+        if (dupResponse.total_groups > dupGroups.length) {
+            dupContainer.innerHTML += `
+                <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
+                    <b>High Volume Detected:</b> Found ${dupResponse.total_groups.toLocaleString()} duplicate sets. To prevent UI freezing, only the first ${dupGroups.length} are shown. Purge these to automatically load the next batch!
+                </div>
+            `;
+        }
+
         if (dupGroups.length === 0) {
-            dupContainer.innerHTML = '<p style="color:var(--text-secondary); font-size:13.5px;">No duplicate elements detected.</p>';
+            dupContainer.innerHTML += '<p style="color:var(--text-secondary); font-size:13.5px;">No duplicate elements detected.</p>';
         } else {
             dupGroups.forEach((group, gIdx) => {
                 const groupWrapper = document.createElement("div");

@@ -206,6 +206,18 @@
                                 <button class="ui-btn danger" id="purge-duplicates-btn">Purge Checked Copies</button>
                             </div>
                         </div>
+                        <div id="dup-pagination-bar" style="display:none; justify-content:space-between; align-items:center; margin-bottom:14px; padding:10px 14px; background:var(--space-bg); border-radius:8px; border:1px solid var(--stroke-color); flex-wrap:wrap; gap:10px;">
+                            <span id="dup-page-info" style="font-size:12px; color:var(--text-secondary);"></span>
+                            <div style="display:flex; gap:8px; align-items:center;">
+                                <button class="ui-btn secondary" id="dup-prev-btn" style="padding:5px 12px; font-size:12px;">Previous</button>
+                                <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:4px; white-space:nowrap;">
+                                    Go to
+                                    <input type="number" id="dup-jump-input" min="1" style="width:52px; padding:4px 6px; border:1px solid var(--stroke-color); border-radius:4px; font-size:12px; text-align:center; outline:none;">
+                                    <button class="ui-btn secondary" id="dup-jump-btn" style="padding:4px 10px; font-size:11px;">Go</button>
+                                </label>
+                                <button class="ui-btn secondary" id="dup-next-btn" style="padding:5px 12px; font-size:12px;">Next</button>
+                            </div>
+                        </div>
                         <div class="duplicate-sets-stack" id="duplicates-render-container"></div>
                     </div>
                 </div>

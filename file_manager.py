@@ -122,14 +122,14 @@ def resolve_folder(args) -> Path:
 # ---------------------------------------------------------------------------
 def run_overview(folder: Path, ext_to_category: dict, exclude_patterns: list):
     print("\n  Scanning folder recursively for the overview (this may take a moment)...")
-    all_files, excluded_count = recursive_scan(folder, exclude_patterns)
+    all_files, excluded_count, size_cache = recursive_scan(folder, exclude_patterns)
     if not all_files:
         print_overview(folder, {}, {}, {}, excluded_count, [])
         return
-    files_by_category, ext_counts, ext_sizes = bucket_files(all_files, ext_to_category)
-    duplicate_groups, unreadable_files = find_duplicates(all_files)
+    files_by_category, ext_counts, ext_sizes = bucket_files(all_files, ext_to_category, size_cache)
+    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache)
     print_overview(folder, ext_counts, ext_sizes, files_by_category, excluded_count,
-                   duplicate_groups, unreadable_files)
+                   duplicate_groups, unreadable_files, size_cache=size_cache)
 
 
 def run_organize(folder: Path, category_map: dict, ext_to_category: dict,
@@ -193,8 +193,8 @@ def run_organize(folder: Path, category_map: dict, ext_to_category: dict,
 
 def run_duplicate_cleaner(folder: Path, exclude_patterns: list):
     print("\n  Scanning folder recursively for duplicates (this may take a moment)...")
-    all_files, _ = recursive_scan(folder, exclude_patterns)
-    duplicate_groups, unreadable_files = find_duplicates(all_files)
+    all_files, _, size_cache = recursive_scan(folder, exclude_patterns)
+    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache)
 
     if not duplicate_groups:
         print("\n  No exact (byte-identical) duplicate files found.")
@@ -232,8 +232,8 @@ def run_duplicate_cleaner(folder: Path, exclude_patterns: list):
 
 def run_storage_analyzer(folder: Path, ext_to_category: dict, exclude_patterns: list):
     print("\n  Scanning folder recursively for the storage analyzer (this may take a moment)...")
-    all_files, _ = recursive_scan(folder, exclude_patterns)
-    files_by_category, _, _ = bucket_files(all_files, ext_to_category)
+    all_files, _, size_cache = recursive_scan(folder, exclude_patterns)
+    files_by_category, _, _ = bucket_files(all_files, ext_to_category, size_cache)
     print_storage_analyzer(compute_storage_usage(files_by_category))
 
 
@@ -330,7 +330,7 @@ def run_rename(folder: Path, ext_to_category: dict, exclude_patterns: list,
         if not admin_mode:
             return False
 
-    all_files, _ = recursive_scan(folder, exclude_patterns)
+    all_files, _, _ = recursive_scan(folder, exclude_patterns)
     files_by_category, _, _ = bucket_files(all_files, ext_to_category)
     handle_bulk_rename(files_by_category, folder)
     return admin_mode

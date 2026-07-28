@@ -14,27 +14,41 @@ from mover import perform_move
 from undo import save_run_log
 
 
-def find_duplicates(files: list, max_workers: int = None):
+def find_duplicates(files: list, max_workers: int = None, size_cache: dict = None):
     """
     Three-stage duplicate search, cheapest filter first:
       1. Group by file size - a size-unique file can't have a duplicate,
          so it's never hashed at all.
-      2. Within each size group, hash only the first 4 KB. Most same-size
+      2. Within each size group, hash only the first 8 KB. Most same-size
          files that AREN'T duplicates differ early, so this throws out the
          vast majority of false candidates almost for free.
       3. Only files that still match after step 2 get a full-content hash
          to confirm they're byte-identical.
     Steps 2 and 3 hash multiple files concurrently, since that's where
     most of the wall-clock time goes on large folders.
+
+    If size_cache is provided (from recursive_scan), uses cached sizes
+    instead of calling stat() per file — eliminates ~50K redundant syscalls.
     Returns (duplicate_groups, unreadable_files) - see module docstring.
     """
     by_size = defaultdict(list)
     unreadable = []
     for f in files:
-        try:
-            by_size[f.stat().st_size].append(f)
-        except OSError:
-            unreadable.append(f)
+        if size_cache is not None:
+            sz = size_cache.get(str(f))
+            if sz is None:
+                try:
+                    sz = f.stat().st_size
+                except OSError:
+                    unreadable.append(f)
+                    continue
+            if sz > 0:
+                by_size[sz].append(f)
+        else:
+            try:
+                by_size[f.stat().st_size].append(f)
+            except OSError:
+                unreadable.append(f)
 
     size_groups = [g for size, g in by_size.items() if len(g) > 1 and size > 0]
     stage2_candidates = [f for g in size_groups for f in g]

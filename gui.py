@@ -59,6 +59,10 @@ APP_STATE = {
     "cached_similar_threshold": None,
     "cached_similar_unreadable": 0,
     "cached_similar_unavailable": False,
+
+    # Pagination state for duplicate groups
+    "dup_page": 0,
+    "dup_page_size": 25,
 }
 
 def clear_cache():
@@ -71,6 +75,7 @@ def clear_cache():
     APP_STATE["cached_similar_threshold"] = None
     APP_STATE["cached_similar_unreadable"] = 0
     APP_STATE["cached_similar_unavailable"] = False
+    APP_STATE["cached_size_cache"] = None
 
 def get_cached_duplicates():
     """Exact-duplicate groups, computed once per scan and reused until clear_cache()."""
@@ -446,15 +451,20 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
         if pillow_missing:
             return {
                 "total_groups": 0, "displayed_groups": [],
+                "page": 0, "total_pages": 0,
                 "error": "This feature needs the Pillow library. Install it with: pip install Pillow"
             }
 
-    # --- PERFORMANCE FIX: TRUNCATE MASSIVE PAYLOADS ---
-    # Generating 1,000+ thumbnails synchronously will freeze the app.
-    # We only process and send the first 50 sets. 
-    max_groups = 50
-    limited_groups = groups[:max_groups]
-        
+    total_groups = len(groups)
+    total_pages = max(1, (total_groups + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = min(start + page_size, total_groups)
+    limited_groups = groups[start:end]
+
+    APP_STATE["dup_page"] = page
+    APP_STATE["dup_page_size"] = page_size
+
     formatted_groups = []
     for idx, group in enumerate(limited_groups, start=start):
         try:
@@ -470,10 +480,48 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
         formatted_groups.append({"id": idx, "size_str": size_str, "files": files_list})
 
     return {
-        "total_groups": len(groups),
+        "total_groups": total_groups,
         "displayed_groups": formatted_groups,
+        "page": page, "total_pages": total_pages,
         "unreadable_count": unreadable_count
     }
+
+
+@eel.expose
+def get_thumbnails_for_group(group_id, scan_type="exact"):
+    """Generate thumbnails for a specific duplicate group on-demand.
+
+    Called by the frontend when a group card is rendered or when the user
+    scrolls it into view. Returns only the thumbnail data — no other
+    computation — so this stays fast even for large datasets.
+    """
+    if APP_STATE["cached_duplicates"] is None and APP_STATE["cached_similar"] is None:
+        return []
+
+    groups = APP_STATE["cached_duplicates"] if scan_type == "exact" else APP_STATE.get("cached_similar", [])
+    if not groups or group_id >= len(groups):
+        return []
+
+    group = groups[group_id][:10]
+    return [{
+        "name": f.name, "path": str(f),
+        "thumb_b64": _generate_base64_thumb(f)
+    } for f in group]
+
+@eel.expose
+def get_total_duplicate_count(scan_type="exact", hamming_threshold=10):
+    """Returns only the total duplicate group count — no group data.
+    Used by the overview dashboard to display the count without
+    triggering the expensive duplicate detection pipeline unless needed."""
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir():
+        return 0
+    if scan_type == "exact":
+        groups = get_cached_duplicates()
+    else:
+        groups, _, _ = get_cached_similar_images(int(hamming_threshold))
+    return len(groups) if groups else 0
+
 
 @eel.expose
 def purge_selected_duplicates(file_paths):

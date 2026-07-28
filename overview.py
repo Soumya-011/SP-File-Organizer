@@ -9,21 +9,28 @@ from pathlib import Path
 from utils import format_size
 
 
-def compute_category_sizes(files_by_category: dict) -> dict:
+def compute_category_sizes(files_by_category: dict, size_cache: dict = None) -> dict:
+    """Compute total bytes per category. If size_cache is provided (from
+    recursive_scan), uses cached sizes instead of calling stat() per file
+    — eliminates ~50K redundant syscalls on large folders."""
     sizes = {}
     for category, files in files_by_category.items():
         total = 0
         for f in files:
-            try:
-                total += f.stat().st_size
-            except OSError:
-                pass
+            if size_cache is not None:
+                total += size_cache.get(str(f), 0)
+            else:
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
         sizes[category] = total
     return sizes
 
 
 def print_overview(folder: Path, ext_counts: dict, ext_sizes: dict, files_by_category: dict,
-                    excluded_count: int, duplicate_groups: list, unreadable_files: list = None):
+                    excluded_count: int, duplicate_groups: list, unreadable_files: list = None,
+                    size_cache: dict = None):
     unreadable_files = unreadable_files or []
     total_files = sum(ext_counts.values())
     total_size = sum(ext_sizes.values())
@@ -49,7 +56,7 @@ def print_overview(folder: Path, ext_counts: dict, ext_sizes: dict, files_by_cat
 
     print("\n  By category:")
     print("  " + "-" * 44)
-    category_sizes = compute_category_sizes(files_by_category)
+    category_sizes = compute_category_sizes(files_by_category, size_cache)
     for category, files in sorted(files_by_category.items(), key=lambda x: -category_sizes.get(x[0], 0)):
         print(f"    {category:<15} {len(files):>4} file(s)   {format_size(category_sizes[category]):>10}")
 
@@ -57,7 +64,10 @@ def print_overview(folder: Path, ext_counts: dict, ext_sizes: dict, files_by_cat
     print("  " + "-" * 44)
     if duplicate_groups:
         extra_copies = sum(len(g) - 1 for g in duplicate_groups)
-        reclaimable = sum((len(g) - 1) * g[0].stat().st_size for g in duplicate_groups)
+        if size_cache:
+            reclaimable = sum((len(g) - 1) * size_cache.get(str(g[0]), 0) for g in duplicate_groups)
+        else:
+            reclaimable = sum((len(g) - 1) * g[0].stat().st_size for g in duplicate_groups)
         print(f"    {len(duplicate_groups)} duplicate set(s) found -> {extra_copies} extra "
               f"copy/copies, ~{format_size(reclaimable)} reclaimable")
         preview = duplicate_groups[:5]

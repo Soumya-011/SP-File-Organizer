@@ -43,8 +43,14 @@ def scan_folder(folder: Path, ext_to_category: dict, exclude_patterns: list):
     return files_by_category, ext_counts, ext_sizes, excluded_count
 
 def recursive_scan(folder: Path, exclude_patterns: list):
-    """Ultra-fast non-blocking recursive tree walk."""
+    """Ultra-fast non-blocking recursive tree walk with cached stat sizes.
+    Returns (all_files, excluded_count, size_cache) where size_cache maps
+    path_string -> file_size. os.scandir entries cache stat results natively
+    on most OSes, so this captures sizes for free during the scan instead of
+    requiring separate stat() calls later in bucket_files/overview/duplicates.
+    """
     all_files = []
+    size_cache = {}
     excluded_count = 0
     script_str = str(SCRIPT_PATH)
     
@@ -54,21 +60,40 @@ def recursive_scan(folder: Path, exclude_patterns: list):
         current = stack.pop()
         try:
             for entry in os.scandir(current):
-                if entry.is_dir(follow_symlinks=False):
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                    
+                if is_dir:
                     if entry.name not in INTERNAL_DIRS:
                         stack.append(entry.path)
-                elif entry.is_file(follow_symlinks=False):
-                    if entry.path == script_str or is_excluded(entry.name, exclude_patterns):
-                        excluded_count += 1
-                    else:
-                        all_files.append(Path(entry.path))
+                else:
+                    try:
+                        is_file = entry.is_file(follow_symlinks=False)
+                    except OSError:
+                        continue
+                        
+                    if is_file:
+                        if entry.path == script_str or is_excluded(entry.name, exclude_patterns):
+                            excluded_count += 1
+                        else:
+                            try:
+                                sz = entry.stat(follow_symlinks=False).st_size
+                                size_cache[entry.path] = sz
+                            except OSError:
+                                sz = 0
+                            all_files.append(Path(entry.path))
         except OSError:
             continue
 
-    return all_files, excluded_count
+    return all_files, excluded_count, size_cache
 
-def bucket_files(files: list, ext_to_category: dict):
-    """Group an arbitrary flat file list into per-extension and per-category tallies."""
+def bucket_files(files: list, ext_to_category: dict, size_cache: dict = None):
+    """Group an arbitrary flat file list into per-extension and per-category tallies.
+    If size_cache is provided (from recursive_scan), uses cached sizes instead
+    of calling stat() for each file — eliminates ~50K redundant syscalls.
+    """
     files_by_category = defaultdict(list)
     ext_counts = defaultdict(int)
     ext_sizes = defaultdict(int)
@@ -77,6 +102,9 @@ def bucket_files(files: list, ext_to_category: dict):
         cat = ext_to_category.get(ext, "Others")
         files_by_category[cat].append(item)
         ext_counts[ext] += 1
-        try: ext_sizes[ext] += item.stat().st_size
-        except OSError: pass
+        if size_cache is not None:
+            ext_sizes[ext] += size_cache.get(str(item), 0)
+        else:
+            try: ext_sizes[ext] += item.stat().st_size
+            except OSError: pass
     return files_by_category, ext_counts, ext_sizes

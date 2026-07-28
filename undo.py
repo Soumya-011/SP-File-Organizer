@@ -29,6 +29,14 @@ def save_run_log(folder: Path, run_log: list):
     log_path.write_text(json.dumps(run_log, indent=2))
     print(f"\nMove log saved: {log_path}")
     print("Run with --undo to reverse this if needed.")
+
+    # Incrementally update the trash origin index if any entries are trash moves
+    try:
+        from recycle_bin import _update_trash_index
+        _update_trash_index(folder, run_log)
+    except Exception:
+        pass
+
     return log_path
 
 

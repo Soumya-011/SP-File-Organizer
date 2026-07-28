@@ -20,10 +20,23 @@ from pathlib import Path
 from utils import TRASH_DIR_NAME, LOG_DIR_NAME
 
 
+TRASH_INDEX_NAME = ".trash_origin_index.json"
+
+
 def _origin_lookup(folder: Path) -> dict:
-    """{trash_path (str): original_source (str)}, built from every run log
-    - active or already-undone - that recorded a move into the trash
-    folder. Used only to label each trashed file with where it came from."""
+    """{trash_path (str): original_source (str)}, built from an incremental
+    index file or (on first run / if index is missing) from every run log.
+    The index is maintained by _update_trash_index() whenever new trashed files
+    are recorded, so subsequent calls are near-instant.
+    """
+    index_path = folder / LOG_DIR_NAME / TRASH_INDEX_NAME
+    if index_path.exists():
+        try:
+            return json.loads(index_path.read_text())
+        except Exception:
+            pass  # Fall through to full rebuild
+
+    # Full rebuild from all logs (only happens once)
     lookup = {}
     log_dir = folder / LOG_DIR_NAME
     if not log_dir.exists():
@@ -31,6 +44,8 @@ def _origin_lookup(folder: Path) -> dict:
 
     trash_root = str(folder / TRASH_DIR_NAME)
     for log_path in log_dir.glob("run_*.json"):
+        if log_path.name == TRASH_INDEX_NAME:
+            continue
         try:
             entries = json.loads(log_path.read_text())
         except Exception:
@@ -40,7 +55,38 @@ def _origin_lookup(folder: Path) -> dict:
             if dest.startswith(trash_root):
                 lookup[dest] = entry.get("source")
 
+    # Persist for next time
+    try:
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps(lookup))
+    except Exception:
+        pass
+
     return lookup
+
+
+def _update_trash_index(folder: Path, run_log: list):
+    """Incrementally update the trash origin index after new files are trashed.
+    Called by save_run_log in undo.py via a post-save hook."""
+    if not run_log:
+        return
+    trash_root = str(folder / TRASH_DIR_NAME)
+    index_path = folder / LOG_DIR_NAME / TRASH_INDEX_NAME
+
+    try:
+        lookup = {}
+        if index_path.exists():
+            lookup = json.loads(index_path.read_text())
+
+        for entry in run_log:
+            dest = entry.get("destination", "")
+            if dest.startswith(trash_root):
+                lookup[dest] = entry.get("source")
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(json.dumps(lookup))
+    except Exception:
+        pass
 
 
 def list_trash_items(folder: Path) -> list:

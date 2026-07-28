@@ -14,6 +14,11 @@ window.currentMismatches = [];
 window.currentPreviewGidx = 0;
 window.currentPreviewFidx = 0;
 
+// Pagination state for duplicates panel
+let dupCurrentPage = 0;
+let dupTotalPages = 1;
+let dupTotalGroups = 0;
+
 // Global Loader Wrappers
 window.showLoader = function(msg = "Processing...") {
     document.getElementById("loader-text").innerText = msg;
@@ -86,12 +91,13 @@ function initDuplicateViewTabHandlers() {
             
             activeScanType = tab.getAttribute("data-scan");
             document.getElementById("similarity-threshold-pane").style.display = (activeScanType === "similar") ? "block" : "none";
-            
+            dupCurrentPage = 0;
             refreshDashboardTelemetryMetrics();
         });
     });
 
     document.getElementById("similarity-select").addEventListener("change", () => {
+        dupCurrentPage = 0;
         refreshDashboardTelemetryMetrics();
     });
 }
@@ -384,25 +390,44 @@ async function refreshDashboardTelemetryMetrics() {
     }
     triggerRuleLivePreviews();
 
-    // --- DUPLICATES (SMART LOADING) ---
-    // Optimization: Only load duplicates if the user is actually looking at the Duplicate tab!
+    // --- DUPLICATES (PAGINATED + LAZY THUMBNAILS) ---
+    // Only load duplicates if the user is actually looking at the Duplicate tab!
     const activePanel = document.querySelector(".view-panel.active-view");
     if (activePanel && activePanel.id === "duplicates-panel") {
         
         if (activeScanType === "similar") {
-            window.showLoader("Analyzing images for visual matches. This takes ~60-90 seconds for large folders...");
+            window.showLoader("Analyzing images for visual matches. This may take a moment for large folders...");
         } else {
             window.showLoader("Scanning exact duplicates...");
         }
 
         const thresholdVal = document.getElementById("similarity-select").value;
-        const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal)();
+        const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
         
         const dupGroups = dupResponse.displayed_groups || [];
-        window.currentDuplicateGroups = dupGroups; 
+        window.currentDuplicateGroups = dupGroups;
+        dupTotalGroups = dupResponse.total_groups || 0;
+        dupTotalPages = dupResponse.total_pages || 1;
+        dupCurrentPage = dupResponse.page || 0;
         
         const dupSelectAllBtn = document.getElementById("dup-select-all");
         if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
+
+        // Pagination bar visibility
+        const paginationBar = document.getElementById("dup-pagination-bar");
+        if (paginationBar) {
+            if (dupTotalPages > 1) {
+                paginationBar.style.display = "flex";
+                const startItem = dupCurrentPage * 25 + 1;
+                const endItem = Math.min((dupCurrentPage + 1) * 25, dupTotalGroups);
+                document.getElementById("dup-page-info").innerText = 
+                    `Showing ${startItem}\u2013${endItem} of ${dupTotalGroups.toLocaleString()} sets`;
+                document.getElementById("dup-prev-btn").disabled = (dupCurrentPage <= 0);
+                document.getElementById("dup-next-btn").disabled = (dupCurrentPage >= dupTotalPages - 1);
+            } else {
+                paginationBar.style.display = "none";
+            }
+        }
 
         const dupContainer = document.getElementById("duplicates-render-container");
         if (dupContainer) {
@@ -418,10 +443,12 @@ async function refreshDashboardTelemetryMetrics() {
                 return;
             }
 
-            if (dupResponse.total_groups > dupGroups.length) {
+            if (dupTotalGroups > dupGroups.length) {
+                const showingCount = (dupCurrentPage + 1) * 25;
+                const shown = Math.min(showingCount, dupTotalGroups);
                 dupContainer.innerHTML += `
                     <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
-                        <b>High Volume Detected:</b> Found ${dupResponse.total_groups.toLocaleString()} duplicate sets. To prevent UI freezing, only the first ${dupGroups.length} are shown. Purge these to automatically load the next batch!
+                        <b>High Volume:</b> ${dupTotalGroups.toLocaleString()} duplicate sets found. Showing ${shown} of ${dupTotalGroups.toLocaleString()}. Use pagination to browse all sets.
                     </div>
                 `;
             }
@@ -449,8 +476,9 @@ async function refreshDashboardTelemetryMetrics() {
                     group.files.forEach((file, fIdx) => {
                         const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
                         
+                        // Lazy thumbnail: placeholder first, loaded async after render
                         let mediaThumbnailHtml = `
-                            <div style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3;">
+                            <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3; cursor:pointer;" title="Loading...">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
                             </div>`;
                             
@@ -476,6 +504,9 @@ async function refreshDashboardTelemetryMetrics() {
                     `;
                     dupContainer.appendChild(groupWrapper);
                 });
+
+                // Lazy-load thumbnails for visible groups after DOM render
+                _loadVisibleThumbnails(activeScanType);
             }
         }
         window.hideLoader();
@@ -768,4 +799,154 @@ window.triggerUndoSequence = async function(logPathString) {
         await refreshDashboardTelemetryMetrics();
         setTimeout(() => alert(`Filesystem adjustments reversed safely. Restored ${res.restored} items.`), 10);
     }
+};
+
+// ---------------------------------------------------------------------------
+// Lazy Thumbnail Loading — fetches thumbnails one group at a time on demand
+// ---------------------------------------------------------------------------
+window._loadVisibleThumbnails = async function(scanType) {
+    const placeholders = document.querySelectorAll(".thumb-placeholder");
+    const globalIds = new Set();
+    placeholders.forEach(el => {
+        const gid = el.getAttribute("data-gid");
+        if (gid !== null) globalIds.add(parseInt(gid, 10));
+    });
+
+    for (const gid of globalIds) {
+        try {
+            const thumbs = await eel.get_thumbnails_for_group(gid, scanType)();
+            document.querySelectorAll(`.thumb-placeholder[data-gid="${gid}"]`).forEach(el => {
+                const gIdx = parseInt(el.getAttribute("data-gidx"), 10);
+                const fIdx = parseInt(el.getAttribute("data-fidx"), 10);
+                const match = thumbs.find(t => t.path === window.currentDuplicateGroups[gIdx].files[fIdx].path);
+                if (match && match.thumb_b64) {
+                    const img = document.createElement("img");
+                    img.src = match.thumb_b64;
+                    img.style.cssText = "cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;";
+                    img.title = "Click for full preview";
+                    img.onclick = () => openImagePreview(gIdx, fIdx);
+                    el.replaceWith(img);
+                }
+            });
+        } catch(e) {
+            // Silently skip if backend is busy
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Pagination Handlers for Duplicates Panel
+// ---------------------------------------------------------------------------
+document.getElementById("dup-prev-btn").addEventListener("click", async () => {
+    if (dupCurrentPage > 0) {
+        dupCurrentPage--;
+        window.showLoader("Loading previous page...");
+        await _loadDuplicatePage();
+        window.hideLoader();
+    }
+});
+
+document.getElementById("dup-next-btn").addEventListener("click", async () => {
+    if (dupCurrentPage < dupTotalPages - 1) {
+        dupCurrentPage++;
+        window.showLoader("Loading next page...");
+        await _loadDuplicatePage();
+        window.hideLoader();
+    }
+});
+
+document.getElementById("dup-jump-btn").addEventListener("click", async () => {
+    const input = document.getElementById("dup-jump-input");
+    const target = parseInt(input.value, 10);
+    if (isNaN(target) || target < 1 || target > dupTotalPages) {
+        input.value = "";
+        return;
+    }
+    dupCurrentPage = target - 1;
+    input.value = "";
+    window.showLoader(`Loading page ${dupCurrentPage + 1}...`);
+    await _loadDuplicatePage();
+    window.hideLoader();
+});
+
+document.getElementById("dup-jump-input").addEventListener("keydown", async (e) => {
+    if (e.key === "Enter") {
+        document.getElementById("dup-jump-btn").click();
+    }
+});
+
+window._loadDuplicatePage = async function() {
+    const thresholdVal = document.getElementById("similarity-select").value;
+    const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
+    
+    const dupGroups = dupResponse.displayed_groups || [];
+    window.currentDuplicateGroups = dupGroups;
+    dupTotalGroups = dupResponse.total_groups || 0;
+    dupTotalPages = dupResponse.total_pages || 1;
+    dupCurrentPage = dupResponse.page || 0;
+
+    const dupSelectAllBtn = document.getElementById("dup-select-all");
+    if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
+
+    const paginationBar = document.getElementById("dup-pagination-bar");
+    if (paginationBar) {
+        if (dupTotalPages > 1) {
+            paginationBar.style.display = "flex";
+            const startItem = dupCurrentPage * 25 + 1;
+            const endItem = Math.min((dupCurrentPage + 1) * 25, dupTotalGroups);
+            document.getElementById("dup-page-info").innerText = 
+                `Showing ${startItem}\u2013${endItem} of ${dupTotalGroups.toLocaleString()} sets`;
+            document.getElementById("dup-prev-btn").disabled = (dupCurrentPage <= 0);
+            document.getElementById("dup-next-btn").disabled = (dupCurrentPage >= dupTotalPages - 1);
+        } else {
+            paginationBar.style.display = "none";
+        }
+    }
+
+    const dupContainer = document.getElementById("duplicates-render-container");
+    if (!dupContainer) return;
+    dupContainer.innerHTML = "";
+
+    if (dupGroups.length === 0) {
+        dupContainer.innerHTML += '<p style="color:var(--text-secondary); font-size:13.5px;">No duplicate elements on this page.</p>';
+        return;
+    }
+
+    dupGroups.forEach((group, gIdx) => {
+        const groupWrapper = document.createElement("div");
+        groupWrapper.style.padding = "16px";
+        groupWrapper.style.border = "1px solid var(--stroke-color)";
+        groupWrapper.style.borderRadius = "8px";
+        groupWrapper.style.marginBottom = "16px";
+        groupWrapper.style.backgroundColor = "#fff";
+        
+        let itemsListHtml = "";
+        group.files.forEach((file, fIdx) => {
+            const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
+            let mediaThumbnailHtml = `
+                <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3; cursor:pointer;" title="Loading...">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                </div>`;
+            if (file.thumb_b64) {
+                mediaThumbnailHtml = `<img src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" style="cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;" title="Click for full preview" />`;
+            }
+            itemsListHtml += `
+                <div class="dup-row" style="display:flex; align-items:center; gap:12px; padding:12px 6px; border-bottom:1px solid var(--stroke-color);">
+                    <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked} style="width:16px; height:16px;">
+                    ${mediaThumbnailHtml}
+                    <div class="dup-info">
+                        <b style="font-size:13px; display:block; color:var(--text-primary); word-break:break-all;">${file.name}</b>
+                        <span style="font-size:11.5px; color:var(--text-secondary); word-break:break-all;">${file.path}</span>
+                    </div>
+                </div>
+            `;
+        });
+        groupWrapper.innerHTML = `
+            <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Set Match Collection — ${group.size_str} copies each</div>
+            <div style="display:flex; flex-direction:column;">${itemsListHtml}</div>
+        `;
+        dupContainer.appendChild(groupWrapper);
+    });
+
+    _loadVisibleThumbnails(activeScanType);
 };

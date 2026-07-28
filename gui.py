@@ -53,7 +53,16 @@ APP_STATE = {
     # ----------------------------------------------------
     "cached_files": None,
     "cached_categories": None,
-    "cached_loose_categories": None
+    "cached_loose_categories": None,
+    "cached_duplicates": None,
+    "cached_similar": None,
+    "cached_similar_threshold": None,
+    "cached_similar_unreadable": 0,
+    "cached_similar_unavailable": False,
+
+    # Pagination state for duplicate groups
+    "dup_page": 0,
+    "dup_page_size": 25,
 }
 
 def clear_cache():
@@ -61,6 +70,34 @@ def clear_cache():
     APP_STATE["cached_files"] = None
     APP_STATE["cached_categories"] = None
     APP_STATE["cached_loose_categories"] = None
+    APP_STATE["cached_duplicates"] = None
+    APP_STATE["cached_similar"] = None
+    APP_STATE["cached_similar_threshold"] = None
+    APP_STATE["cached_similar_unreadable"] = 0
+    APP_STATE["cached_similar_unavailable"] = False
+    APP_STATE["cached_size_cache"] = None
+
+def get_cached_duplicates():
+    """Exact-duplicate groups, computed once per scan and reused until clear_cache()."""
+    if APP_STATE["cached_duplicates"] is None:
+        all_files, _, _ = get_cached_scans()
+        APP_STATE["cached_duplicates"] = find_duplicates(all_files, size_cache=APP_STATE.get("cached_size_cache"))[0] if all_files else []
+    return APP_STATE["cached_duplicates"]
+
+def get_cached_similar_images(threshold: int):
+    """Returns (groups, unreadable_count, unavailable). Cached per-threshold
+    so switching tabs at the same threshold doesn't re-hash every image."""
+    key = APP_STATE.get("cached_similar_threshold")
+    if key != threshold or APP_STATE.get("cached_similar") is None:
+        all_files, _, _ = get_cached_scans()
+        groups, unreadable, unavailable = find_similar_images(all_files, threshold=threshold)
+        APP_STATE["cached_similar"] = groups
+        APP_STATE["cached_similar_unreadable"] = len(unreadable)
+        APP_STATE["cached_similar_unavailable"] = unavailable
+        APP_STATE["cached_similar_threshold"] = threshold
+    return (APP_STATE["cached_similar"],
+            APP_STATE.get("cached_similar_unreadable", 0),
+            APP_STATE.get("cached_similar_unavailable", False))
 
 def get_cached_scans():
     """Returns cached files instantly if already scanned, otherwise does a fast scan."""
@@ -68,8 +105,8 @@ def get_cached_scans():
         folder = APP_STATE["folder"]
         if folder and folder.is_dir():
             # 1. Recursive Scan (for Dashboard & Duplicates)
-            all_files, _ = recursive_scan(folder, APP_STATE["exclude_patterns"])
-            all_files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"])
+            all_files, _, size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
+            all_files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"], size_cache)
             
             # 2. Top-Level Scan (for Organize tab)
             loose_files_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
@@ -77,6 +114,7 @@ def get_cached_scans():
             APP_STATE["cached_files"] = all_files
             APP_STATE["cached_categories"] = all_files_by_cat
             APP_STATE["cached_loose_categories"] = loose_files_by_cat
+            APP_STATE["cached_size_cache"] = size_cache
         else:
             return [], {}, {}
             
@@ -165,7 +203,7 @@ def execute_storage_telemetry():
     if not all_files:
         return {"total_size_str": "0 B", "total_files": 0, "duplicate_sets": 0, "trash_count": 0, "categories": []}
         
-    duplicate_groups, _ = find_duplicates(all_files)
+    duplicate_groups = get_cached_duplicates()
     sizes = compute_storage_usage(files_by_category)
     total_bytes = sum(sizes.values())
     categories_data = []
@@ -375,40 +413,101 @@ def trigger_separation_organization(rule_type, timing, limit_value):
     return {"status": "success", "moved": len(run_log)}
 
 @eel.expose
-def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10):
+def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, page_size=25):
+    """Paginated duplicate groups — loads one page at a time.
+
+    Thumbnails are NOT generated here. The frontend calls
+    get_thumbnails_for_group() on-demand when a group is expanded or
+    scrolled into view. This keeps the initial payload small and
+    prevents the Eel main thread from blocking on 500+ PIL opens.
+    """
     folder = APP_STATE["folder"]
-    if not folder or not folder.is_dir(): return {"total_groups": 0, "displayed_groups": []}
-    
+    if not folder or not folder.is_dir():
+        return {"total_groups": 0, "displayed_groups": [], "page": 0, "total_pages": 0}
+
     all_files, _, _ = get_cached_scans()
-    
+
+    unreadable_count = 0
+    pillow_missing = False
+
     if scan_type == "exact":
-        groups, _ = find_duplicates(all_files)
+        groups = get_cached_duplicates()
     else:
-        groups, _, _ = find_similar_images(all_files, threshold=int(hamming_threshold))
-        
-    # --- PERFORMANCE FIX: TRUNCATE MASSIVE PAYLOADS ---
-    # Generating 1,000+ thumbnails synchronously will freeze the app.
-    # We only process and send the first 50 sets. 
-    max_groups = 50
-    limited_groups = groups[:max_groups]
-        
+        groups, unreadable_count, pillow_missing = get_cached_similar_images(int(hamming_threshold))
+        if pillow_missing:
+            return {
+                "total_groups": 0, "displayed_groups": [],
+                "page": 0, "total_pages": 0,
+                "error": "This feature needs the Pillow library. Install it with: pip install Pillow"
+            }
+
+    total_groups = len(groups)
+    total_pages = max(1, (total_groups + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = min(start + page_size, total_groups)
+    limited_groups = groups[start:end]
+
+    APP_STATE["dup_page"] = page
+    APP_STATE["dup_page_size"] = page_size
+
     formatted_groups = []
-    for idx, group in enumerate(limited_groups):
-        try: size_str = format_size(group[0].stat().st_size)
-        except OSError: size_str = "Unknown"
-        
-        # Also limit to top 10 copies per set just in case a user has 1,000 identical blank files
+    for idx, group in enumerate(limited_groups, start=start):
+        try:
+            size_str = format_size(group[0].stat().st_size)
+        except OSError:
+            size_str = "Unknown"
+
+        # No thumbnails here — lazy-loaded via get_thumbnails_for_group()
         files_list = [{
-            "name": f.name, "path": str(f), "is_image": is_image_file(f), "thumb_b64": _generate_base64_thumb(f)
+            "name": f.name, "path": str(f), "is_image": is_image_file(f), "thumb_b64": ""
         } for f in group[:10]]
-        
+
         formatted_groups.append({"id": idx, "size_str": size_str, "files": files_list})
-        
-    # Return as a dictionary so the frontend knows if there are more batches left
+
     return {
-        "total_groups": len(groups),
-        "displayed_groups": formatted_groups
+        "total_groups": total_groups,
+        "displayed_groups": formatted_groups,
+        "page": page, "total_pages": total_pages,
+        "unreadable_count": unreadable_count
     }
+
+
+@eel.expose
+def get_thumbnails_for_group(group_id, scan_type="exact"):
+    """Generate thumbnails for a specific duplicate group on-demand.
+
+    Called by the frontend when a group card is rendered or when the user
+    scrolls it into view. Returns only the thumbnail data — no other
+    computation — so this stays fast even for large datasets.
+    """
+    if APP_STATE["cached_duplicates"] is None and APP_STATE["cached_similar"] is None:
+        return []
+
+    groups = APP_STATE["cached_duplicates"] if scan_type == "exact" else APP_STATE.get("cached_similar", [])
+    if not groups or group_id >= len(groups):
+        return []
+
+    group = groups[group_id][:10]
+    return [{
+        "name": f.name, "path": str(f),
+        "thumb_b64": _generate_base64_thumb(f)
+    } for f in group]
+
+@eel.expose
+def get_total_duplicate_count(scan_type="exact", hamming_threshold=10):
+    """Returns only the total duplicate group count — no group data.
+    Used by the overview dashboard to display the count without
+    triggering the expensive duplicate detection pipeline unless needed."""
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir():
+        return 0
+    if scan_type == "exact":
+        groups = get_cached_duplicates()
+    else:
+        groups, _, _ = get_cached_similar_images(int(hamming_threshold))
+    return len(groups) if groups else 0
+
 
 @eel.expose
 def purge_selected_duplicates(file_paths):

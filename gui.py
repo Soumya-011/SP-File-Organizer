@@ -87,22 +87,14 @@ def get_cached_duplicates():
 def get_cached_similar_images(threshold: int):
     """Returns (groups, unreadable_count, unavailable). Cached per-threshold
     so switching tabs at the same threshold doesn't re-hash every image."""
-    """Returns (groups, unreadable_count, unavailable). Cached per-threshold
-    so switching tabs at the same threshold doesn't re-hash every image."""
     key = APP_STATE.get("cached_similar_threshold")
     if key != threshold or APP_STATE.get("cached_similar") is None:
         all_files, _, _ = get_cached_scans()
         groups, unreadable, unavailable = find_similar_images(all_files, threshold=threshold)
-        groups, unreadable, unavailable = find_similar_images(all_files, threshold=threshold)
         APP_STATE["cached_similar"] = groups
         APP_STATE["cached_similar_unreadable"] = len(unreadable)
         APP_STATE["cached_similar_unavailable"] = unavailable
-        APP_STATE["cached_similar_unreadable"] = len(unreadable)
-        APP_STATE["cached_similar_unavailable"] = unavailable
         APP_STATE["cached_similar_threshold"] = threshold
-    return (APP_STATE["cached_similar"],
-            APP_STATE.get("cached_similar_unreadable", 0),
-            APP_STATE.get("cached_similar_unavailable", False))
     return (APP_STATE["cached_similar"],
             APP_STATE.get("cached_similar_unreadable", 0),
             APP_STATE.get("cached_similar_unavailable", False))
@@ -208,10 +200,8 @@ def execute_storage_telemetry():
     # Leverages memory buffer
     all_files, files_by_category, _ = get_cached_scans()
     
-    
     if not all_files:
         return {"total_size_str": "0 B", "total_files": 0, "duplicate_sets": 0, "trash_count": 0, "categories": []}
-        
         
     duplicate_groups = get_cached_duplicates()
     sizes = compute_storage_usage(files_by_category)
@@ -436,10 +426,6 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
         return {"total_groups": 0, "displayed_groups": [], "page": 0, "total_pages": 0}
 
     all_files, _, _ = get_cached_scans()
-
-    unreadable_count = 0
-    pillow_missing = False
-
 
     unreadable_count = 0
     pillow_missing = False

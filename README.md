@@ -1,4 +1,4 @@
-# 📂 Enterprise File Organizer (v0.8)
+# 📂 Sp Enterprise File Organizer (v0.8)
 
 A high-performance, web-native desktop utility that automatically cleans, sorts, and manages massive file directories. Built with a decoupled Python core and an interactive Chromium-based frontend using **Eel**.
 
@@ -69,4 +69,4 @@ undo.py / recycle_bin.py: The transactional logging and recovery ecosystem.
 web/: Contains the pure HTML/CSS/JS interface injected into the Chromium app window.
 
 📄 License
-This project is licensed under the MIT License - see the LICENSE file for details.   
+This project is licensed under the GPL License - see the LICENSE file for details.   

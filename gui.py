@@ -11,10 +11,11 @@ import base64
 import shutil
 from datetime import datetime
 from pathlib import Path
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import eel
 import tkinter as tk
 from tkinter import filedialog
-from collections import defaultdict
 
 try:
     from PIL import Image
@@ -27,6 +28,7 @@ from utils import format_size, get_file_size_mb, get_file_age_days
 from config import load_config, build_ext_to_category, load_raw_config, save_raw_config, DEFAULT_CATEGORY_MAP
 from categories import normalize_extensions
 from scanner import scan_folder, recursive_scan, bucket_files
+import cache_store
 from storage_analyzer import compute_storage_usage
 from duplicates import find_duplicates, move_to_trash
 from image_duplicates import find_similar_images, is_image_file
@@ -118,24 +120,34 @@ def get_cached_similar_images(threshold: int):
 def get_cached_scans():
     """Returns cached files instantly if already scanned, otherwise does a fast scan.
     Merges files from the primary folder AND the comparison folder (if set).
+
+    PERFORMANCE (#2): Multi-folder scans run in parallel threads.
     """
     if APP_STATE["cached_files"] is None:
         folders = _get_all_folders()
         if not folders:
             return [], {}, {}
 
+        def _scan_one_folder(folder):
+            r_files, _, r_size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
+            # bucket_files now returns 4 values (added file_to_cat)
+            r_by_cat, _, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
+            l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+            return r_files, r_size_cache, r_by_cat, l_by_cat
+
+        # (#2) Parallel folder scanning
         merged_files = []
         merged_size_cache = {}
         merged_by_cat = defaultdict(list)
         merged_loose = defaultdict(list)
 
-        for folder in folders:
-            # 1. Recursive scan (for Dashboard & Duplicates)
-            r_files, _, r_size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
-            r_by_cat, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
-            # 2. Top-level scan (for Organize tab)
-            l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+        if len(folders) > 1:
+            with ThreadPoolExecutor(max_workers=min(len(folders), 4)) as pool:
+                results = list(pool.map(_scan_one_folder, folders))
+        else:
+            results = [_scan_one_folder(f) for f in folders]
 
+        for r_files, r_size_cache, r_by_cat, l_by_cat in results:
             merged_files.extend(r_files)
             merged_size_cache.update(r_size_cache)
             for cat, files in r_by_cat.items():
@@ -150,9 +162,29 @@ def get_cached_scans():
 
     return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
 
-def _generate_base64_thumb(file_path: Path):
+def _generate_base64_thumb(file_path: Path, use_cache: bool = True):
+    """Generate base64 thumbnail, with SQLite caching (#3).
+
+    PERFORMANCE (#3): Thumbnails are cached to SQLite keyed by
+    (path, mtime, size), so unchanged images skip PIL encoding.
+    """
     if not PIL_AVAILABLE or not is_image_file(file_path):
         return ""
+    if not file_path.exists():
+        return ""
+
+    # Check cache (#3)
+    if use_cache and cache_store._DB_PATH is not None:
+        try:
+            st = file_path.stat()
+            cached = cache_store.get_cached_thumb(file_path, st.st_mtime, st.st_size)
+            if cached:
+                return cached
+        except OSError:
+            pass
+        except Exception:
+            pass
+
     try:
         with Image.open(file_path) as img:
             thumb = img.copy()
@@ -162,7 +194,17 @@ def _generate_base64_thumb(file_path: Path):
             if thumb.mode in ("RGBA", "P"):
                 thumb = thumb.convert("RGB")
             thumb.save(buffered, format="JPEG", quality=75)
-            return f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
+            b64 = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
+
+            # Store to cache (#3)
+            if use_cache and cache_store._DB_PATH is not None:
+                try:
+                    st = file_path.stat()
+                    cache_store.put_cached_thumb(file_path, st.st_mtime, st.st_size, b64)
+                except Exception:
+                    pass
+
+            return b64
     except Exception:
         return ""
 
@@ -186,6 +228,8 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
     APP_STATE["config_path"] = config_path
     if initial_folder:
         APP_STATE["folder"] = Path(initial_folder)
+        # Initialize cache store (#3, #4, #7, #9)
+        cache_store.init_cache_db(APP_STATE["folder"])
     cmap, excludes, pin = load_config(config_path)
     APP_STATE["category_map"] = cmap
     APP_STATE["exclude_patterns"] = excludes
@@ -609,6 +653,103 @@ def get_thumbnails_for_group(group_id, scan_type="exact"):
         "name": f.name, "path": str(f),
         "thumb_b64": _generate_base64_thumb(f)
     } for f in group]
+
+@eel.expose
+def get_thumbnails_for_page(group_ids, scan_type="exact"):
+    """Batch endpoint (#8): Fetch thumbnails for ALL groups on a page in one call.
+
+    PERFORMANCE (#8): Instead of N round-trips (one per group), this fetches
+    thumbnails for every visible group in a single request. Uses ThreadPoolExecutor
+    for parallel PIL encoding, plus the thumbnail cache (#3).
+
+    Args:
+        group_ids: list of group IDs to fetch thumbnails for
+        scan_type: "exact" or "similar"
+
+    Returns: {group_id: [{name, path, thumb_b64}, ...], ...}
+    """
+    if APP_STATE["cached_duplicates"] is None and APP_STATE["cached_similar"] is None:
+        return {}
+
+    groups = APP_STATE["cached_duplicates"] if scan_type == "exact" else APP_STATE.get("cached_similar", [])
+    if not groups:
+        return {}
+
+    # Collect all unique image paths from requested groups (with cache lookup)
+    result = {}
+    to_generate = []  # (group_id, file_idx, file_path) for cache misses
+
+    # First pass: check cache for all images
+    cache_entries = []  # (path_str, mtime, size)
+    path_to_meta = {}  # path_str -> (mtime, size, file_path, group_id, file_idx)
+
+    for gid in group_ids:
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            continue
+        if gid >= len(groups):
+            continue
+        group = groups[gid][:10]
+        result[gid] = []
+        for fidx, f in enumerate(group):
+            if not is_image_file(f) or not f.exists():
+                result[gid].append({"name": f.name, "path": str(f), "thumb_b64": ""})
+                continue
+            try:
+                st = f.stat()
+                cache_entries.append((str(f), st.st_mtime, st.st_size))
+                path_to_meta[str(f)] = (st.st_mtime, st.st_size, f, gid, fidx)
+                result[gid].append({"name": f.name, "path": str(f), "thumb_b64": ""})
+            except OSError:
+                result[gid].append({"name": f.name, "path": str(f), "thumb_b64": ""})
+
+    # Batch-fetch from cache (#3)
+    cached = {}
+    if cache_store._DB_PATH is not None and cache_entries:
+        cached = cache_store.get_cached_thumbs_batch(cache_entries)
+
+    # Apply cached results and collect misses
+    misses = []  # (file_path, group_id, file_idx)
+    new_cache_entries = []  # (path_str, mtime, size, b64_data)
+
+    for path_str, (mtime, size, f, gid, fidx) in path_to_meta.items():
+        if path_str in cached:
+            # Update the result entry
+            for entry in result[gid]:
+                if entry["path"] == path_str:
+                    entry["thumb_b64"] = cached[path_str]
+                    break
+        else:
+            misses.append((f, gid, fidx, mtime, size))
+
+    # Generate thumbnails for cache misses in parallel
+    def _gen_one(item):
+        f, gid, fidx, mtime, size = item
+        return (f, gid, fidx, mtime, size, _generate_base64_thumb(f, use_cache=False))
+
+    if misses:
+        if len(misses) > 3:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                generated = list(pool.map(_gen_one, misses))
+        else:
+            generated = [_gen_one(m) for m in misses]
+
+        for f, gid, fidx, mtime, size, b64 in generated:
+            # Update result
+            for entry in result[gid]:
+                if entry["path"] == str(f):
+                    entry["thumb_b64"] = b64
+                    break
+            # Queue for cache storage
+            if b64:
+                new_cache_entries.append((str(f), mtime, size, b64))
+
+    # Batch-store new thumbnails to cache (#3)
+    if new_cache_entries and cache_store._DB_PATH is not None:
+        cache_store.put_cached_thumbs_batch(new_cache_entries)
+
+    return result
 
 @eel.expose
 def get_total_duplicate_count(scan_type="exact", hamming_threshold=10):

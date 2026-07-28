@@ -11,6 +11,9 @@ time it was trashed. This module re-reads those logs purely to answer
 "where did this come from", then acts directly on the trash folder itself
 - it does not touch or replay the undo system in undo.py, so using the
 Recycle Bin and using Undo History never conflict with each other.
+
+PERFORMANCE (#7): Origin lookup now uses cache_store.py SQLite instead
+of reading/writing a full JSON file on every operation.
 """
 
 import json
@@ -24,11 +27,27 @@ TRASH_INDEX_NAME = ".trash_origin_index.json"
 
 
 def _origin_lookup(folder: Path) -> dict:
-    """{trash_path (str): original_source (str)}, built from an incremental
-    index file or (on first run / if index is missing) from every run log.
-    The index is maintained by _update_trash_index() whenever new trashed files
-    are recorded, so subsequent calls are near-instant.
+    """{trash_path (str): original_source (str)}, built from SQLite cache
+    via cache_store.py, or (on first run / if cache is empty) from every
+    run log. The cache is maintained by cache_store.update_trash_index()
+    whenever new trashed files are recorded, so subsequent calls are
+    near-instant.
+
+    PERFORMANCE (#7): Uses SQLite instead of JSON for O(1) lookups.
     """
+    # Try SQLite cache first (#7)
+    try:
+        import cache_store
+        if cache_store._DB_PATH is not None:
+            origins = cache_store.get_trash_origins()
+            if origins:
+                return origins
+            # Empty DB — rebuild from logs
+            return cache_store.rebuild_trash_index_from_logs(folder)
+    except Exception:
+        pass
+
+    # Fallback: legacy JSON index
     index_path = folder / LOG_DIR_NAME / TRASH_INDEX_NAME
     if index_path.exists():
         try:
@@ -55,7 +74,7 @@ def _origin_lookup(folder: Path) -> dict:
             if dest.startswith(trash_root):
                 lookup[dest] = entry.get("source")
 
-    # Persist for next time
+    # Persist for next time (legacy JSON)
     try:
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(json.dumps(lookup))
@@ -67,9 +86,23 @@ def _origin_lookup(folder: Path) -> dict:
 
 def _update_trash_index(folder: Path, run_log: list):
     """Incrementally update the trash origin index after new files are trashed.
-    Called by save_run_log in undo.py via a post-save hook."""
+    Called by save_run_log in undo.py via a post-save hook.
+
+    PERFORMANCE (#7): This is now a legacy fallback — save_run_log in undo.py
+    calls cache_store.update_trash_index() directly. This function exists only
+    for backward compatibility if called from elsewhere.
+    """
     if not run_log:
         return
+    # Try SQLite first
+    try:
+        import cache_store
+        cache_store.update_trash_index(run_log)
+        return
+    except Exception:
+        pass
+
+    # Fallback: legacy JSON update
     trash_root = str(folder / TRASH_DIR_NAME)
     index_path = folder / LOG_DIR_NAME / TRASH_INDEX_NAME
 

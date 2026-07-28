@@ -1,6 +1,12 @@
 """
 Move log + undo: every real run writes a log of source -> destination moves;
 --undo reverses the most recent (not-yet-undone) run in a folder.
+
+PERFORMANCE (#7): Trash origin index now uses cache_store.py SQLite instead
+of reading/writing full JSON on every operation.
+
+PERFORMANCE (#9): Run history uses a manifest index in cache_store.py for
+instant listing instead of reading every JSON file.
 """
 
 import json
@@ -30,10 +36,30 @@ def save_run_log(folder: Path, run_log: list):
     print(f"\nMove log saved: {log_path}")
     print("Run with --undo to reverse this if needed.")
 
-    # Incrementally update the trash origin index if any entries are trash moves
+    # (#7) Incrementally update the trash origin index via SQLite
     try:
-        from recycle_bin import _update_trash_index
-        _update_trash_index(folder, run_log)
+        import cache_store
+        cache_store.update_trash_index(run_log)
+    except Exception:
+        # Fallback to legacy JSON-based index
+        try:
+            from recycle_bin import _update_trash_index
+            _update_trash_index(folder, run_log)
+        except Exception:
+            pass
+
+    # (#9) Update history manifest
+    try:
+        import cache_store
+        parts = log_path.stem.split("_")
+        ts = None
+        if len(parts) >= 3:
+            try:
+                ts = datetime.strptime(f"{parts[1]}_{parts[2]}", "%Y%m%d_%H%M%S")
+            except ValueError:
+                pass
+        label = ts.strftime("%Y-%m-%d %H:%M:%S") if ts else log_path.stem
+        cache_store.update_history_manifest(str(log_path), str(ts or ""), len(run_log), label)
     except Exception:
         pass
 
@@ -44,6 +70,20 @@ def find_latest_log(folder: Path):
     log_dir = folder / LOG_DIR_NAME
     if not log_dir.exists():
         return None
+
+    # (#9) Try manifest first for instant lookup
+    try:
+        import cache_store
+        manifest = cache_store.get_history_manifest()
+        for entry in manifest:
+            if not entry["is_undone"]:
+                p = Path(entry["log_path"])
+                if p.exists():
+                    return p
+    except Exception:
+        pass
+
+    # Fallback: full directory scan
     logs = sorted(
         (p for p in log_dir.glob("run_*.json") if not p.name.endswith(".undone.json")),
         reverse=True,
@@ -53,18 +93,57 @@ def find_latest_log(folder: Path):
 
 def list_run_logs(folder: Path) -> list:
     """
-    List every completed (not-yet-undone) run log in `folder`, newest first
-    - this is the "Undo History" the GUI (and --undo could, in principle)
-    lets the user pick from, instead of only ever offering the latest run.
+    List every completed (not-yet-undone) run log in `folder`, newest first.
 
-    Each entry is a dict: {"path": Path, "timestamp": datetime | None,
-    "count": int, "label": str}. `label` is a human-readable timestamp
-    string, falling back to the raw filename if it can't be parsed.
+    PERFORMANCE (#9): Uses history_manifest from cache_store.py for instant
+    listing instead of reading every JSON file from disk.
     """
     log_dir = folder / LOG_DIR_NAME
     if not log_dir.exists():
         return []
 
+    # Try manifest first
+    try:
+        import cache_store
+        manifest = cache_store.get_history_manifest()
+        if manifest:
+            entries = []
+            for m in manifest:
+                p = Path(m["log_path"])
+                if p.exists() and not m["is_undone"]:
+                    entries.append({
+                        "path": p,
+                        "timestamp": None,  # parsed from label if needed
+                        "count": m["count"],
+                        "label": m["label"]
+                    })
+            if entries:
+                return entries
+    except Exception:
+        pass
+
+    # Fallback: rebuild manifest from disk
+    try:
+        import cache_store
+        cache_store.rebuild_history_manifest(folder)
+        manifest = cache_store.get_history_manifest()
+        if manifest:
+            entries = []
+            for m in manifest:
+                p = Path(m["log_path"])
+                if p.exists() and not m["is_undone"]:
+                    entries.append({
+                        "path": p,
+                        "timestamp": None,
+                        "count": m["count"],
+                        "label": m["label"]
+                    })
+            if entries:
+                return entries
+    except Exception:
+        pass
+
+    # Full fallback: original directory scan
     logs = sorted(
         (p for p in log_dir.glob("run_*.json") if not p.name.endswith(".undone.json")),
         reverse=True,
@@ -134,6 +213,14 @@ def restore_run(log_path: Path, on_restore=None, on_skip=None):
 
     used_path = log_path.with_name(log_path.stem + ".undone.json")
     log_path.rename(used_path)
+
+    # (#9) Mark as undone in manifest
+    try:
+        import cache_store
+        cache_store.mark_history_undone(str(log_path))
+    except Exception:
+        pass
+
     return restored, len(entries)
 
 

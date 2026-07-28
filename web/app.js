@@ -1001,9 +1001,16 @@ window._loadVisibleThumbnails = async function(scanType) {
         if (gid !== null) globalIds.add(parseInt(gid, 10));
     });
 
-    for (const gid of globalIds) {
-        try {
-            const thumbs = await eel.get_thumbnails_for_group(gid, scanType)();
+    // (#8) Batch thumbnail loading — single API call for all visible groups
+    const gidList = Array.from(globalIds);
+    if (gidList.length === 0) return;
+
+    try {
+        const thumbsMap = await eel.get_thumbnails_for_page(gidList, scanType)();
+        // thumbsMap = {group_id: [{name, path, thumb_b64}, ...], ...}
+        for (const gid of gidList) {
+            const thumbs = thumbsMap[gid];
+            if (!thumbs) continue;
             document.querySelectorAll(`.thumb-placeholder[data-gid="${gid}"]`).forEach(el => {
                 const gIdx = parseInt(el.getAttribute("data-gidx"), 10);
                 const fIdx = parseInt(el.getAttribute("data-fidx"), 10);
@@ -1017,9 +1024,9 @@ window._loadVisibleThumbnails = async function(scanType) {
                     el.replaceWith(img);
                 }
             });
-        } catch(e) {
-            // Silently skip if backend is busy
         }
+    } catch(e) {
+        // Silently skip if backend is busy
     }
 };
 

@@ -2,6 +2,9 @@
 Duplicate detection and cleanup: hashing files to find identical content,
 letting the user pick which copies to delete, and "deleting" by moving to a
 hidden, reversible trash folder.
+
+PERFORMANCE (#4): Partial and full content hashes are cached to SQLite via
+cache_store.py so unchanged files skip rehashing on subsequent sessions.
 """
 
 from collections import defaultdict
@@ -29,24 +32,42 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
 
     If size_cache is provided (from recursive_scan), uses cached sizes
     instead of calling stat() per file — eliminates ~50K redundant syscalls.
+
+    PERFORMANCE (#4): Checks cache_store for previously computed partial and
+    full hashes. Only uncached files are hashed, then new results are
+    batch-stored to SQLite.
+
     Returns (duplicate_groups, unreadable_files) - see module docstring.
     """
     by_size = defaultdict(list)
     unreadable = []
+    # Also build stat info for cache lookups
+    file_stats = {}
     for f in files:
         if size_cache is not None:
             sz = size_cache.get(str(f))
             if sz is None:
                 try:
-                    sz = f.stat().st_size
+                    st = f.stat()
+                    sz = st.st_size
+                    file_stats[f] = (st.st_mtime, sz)
                 except OSError:
                     unreadable.append(f)
                     continue
-            if sz > 0:
-                by_size[sz].append(f)
+                if sz > 0:
+                    by_size[sz].append(f)
+            else:
+                try:
+                    file_stats[f] = (f.stat().st_mtime, sz)
+                except OSError:
+                    pass
+                if sz > 0:
+                    by_size[sz].append(f)
         else:
             try:
-                by_size[f.stat().st_size].append(f)
+                st = f.stat()
+                file_stats[f] = (st.st_mtime, st.st_size)
+                by_size[st.st_size].append(f)
             except OSError:
                 unreadable.append(f)
 
@@ -55,11 +76,48 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     if not stage2_candidates:
         return [], unreadable
 
-    partial_hashes, unreadable_p = concurrent_hash_all(stage2_candidates, partial_hash, max_workers)
+    # Try cache (#4)
+    try:
+        import cache_store
+        cache_available = cache_store._DB_PATH is not None
+    except (ImportError, AttributeError):
+        cache_available = False
+
+    # Stage 2: partial hash with cache
+    partial_hashes = {}
+    uncached_stage2 = []
+
+    if cache_available and file_stats:
+        batch_keys = [(str(f), "partial", file_stats[f][0], file_stats[f][1])
+                      for f in stage2_candidates if f in file_stats]
+        cached_results = cache_store.get_cached_hashes_batch(batch_keys)
+        for f in stage2_candidates:
+            if f in file_stats:
+                key = (str(f), "partial", file_stats[f][0], file_stats[f][1])
+                if key in cached_results:
+                    partial_hashes[f] = cached_results[key]
+                else:
+                    uncached_stage2.append(f)
+            else:
+                uncached_stage2.append(f)
+    else:
+        uncached_stage2 = stage2_candidates
+
+    new_partial, unreadable_p = concurrent_hash_all(uncached_stage2, partial_hash, max_workers)
+    partial_hashes.update(new_partial)
     unreadable.extend(unreadable_p)
 
-    # Sub-group within each original size group so files of different
-    # sizes never get compared against each other.
+    # Batch-store new partial hashes
+    if cache_available and new_partial:
+        store_entries = []
+        for f, h in new_partial.items():
+            if f in file_stats:
+                mtime, size = file_stats[f]
+                store_entries.append((str(f), "partial", mtime, size, h))
+        if store_entries:
+            cache_store.put_cached_hashes_batch(store_entries)
+
+    # Sub-group within each original size group
     stage3_candidates = []
     for group in size_groups:
         by_partial = defaultdict(list)
@@ -71,12 +129,41 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     if not stage3_candidates:
         return [], unreadable
 
-    # A full-hash match implies identical bytes, which implies identical
-    # size - so it's safe to hash every remaining candidate in one batch
-    # and group purely by hash, without re-partitioning by size/partial hash.
     stage3_flat = [f for sub in stage3_candidates for f in sub]
-    full_hashes, unreadable_f = concurrent_hash_all(stage3_flat, file_hash, max_workers)
+
+    # Stage 3: full hash with cache
+    full_hashes = {}
+    uncached_stage3 = []
+
+    if cache_available and file_stats:
+        batch_keys = [(str(f), "full", file_stats[f][0], file_stats[f][1])
+                      for f in stage3_flat if f in file_stats]
+        cached_results = cache_store.get_cached_hashes_batch(batch_keys)
+        for f in stage3_flat:
+            if f in file_stats:
+                key = (str(f), "full", file_stats[f][0], file_stats[f][1])
+                if key in cached_results:
+                    full_hashes[f] = cached_results[key]
+                else:
+                    uncached_stage3.append(f)
+            else:
+                uncached_stage3.append(f)
+    else:
+        uncached_stage3 = stage3_flat
+
+    new_full, unreadable_f = concurrent_hash_all(uncached_stage3, file_hash, max_workers)
+    full_hashes.update(new_full)
     unreadable.extend(unreadable_f)
+
+    # Batch-store new full hashes
+    if cache_available and new_full:
+        store_entries = []
+        for f, h in new_full.items():
+            if f in file_stats:
+                mtime, size = file_stats[f]
+                store_entries.append((str(f), "full", mtime, size, h))
+        if store_entries:
+            cache_store.put_cached_hashes_batch(store_entries)
 
     by_full = defaultdict(list)
     for f, h in full_hashes.items():

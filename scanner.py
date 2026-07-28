@@ -1,6 +1,10 @@
 """
 Hyper-optimized folder scanning using low-level os.scandir.
 Bypasses slow pathlib.resolve() checks for maximum disk throughput.
+
+PERFORMANCE (#6): bucket_files() now returns a flat category lookup dict
+alongside the by-category file lists, avoiding redundant suffix lookups
+downstream.
 """
 
 import os
@@ -93,18 +97,23 @@ def bucket_files(files: list, ext_to_category: dict, size_cache: dict = None):
     """Group an arbitrary flat file list into per-extension and per-category tallies.
     If size_cache is provided (from recursive_scan), uses cached sizes instead
     of calling stat() for each file — eliminates ~50K redundant syscalls.
+
+    PERFORMANCE (#6): Now also returns a file_to_category dict for O(1)
+    lookups downstream, avoiding repeated suffix → category mapping.
     """
     files_by_category = defaultdict(list)
     ext_counts = defaultdict(int)
     ext_sizes = defaultdict(int)
+    file_to_cat = {}  # NEW: Path → category_name for O(1) lookups
     for item in files:
         ext = item.suffix.lower() or "(no extension)"
         cat = ext_to_category.get(ext, "Others")
         files_by_category[cat].append(item)
         ext_counts[ext] += 1
+        file_to_cat[str(item)] = cat  # NEW
         if size_cache is not None:
             ext_sizes[ext] += size_cache.get(str(item), 0)
         else:
             try: ext_sizes[ext] += item.stat().st_size
             except OSError: pass
-    return files_by_category, ext_counts, ext_sizes
+    return files_by_category, ext_counts, ext_sizes, file_to_cat

@@ -14,6 +14,7 @@ from pathlib import Path
 import eel
 import tkinter as tk
 from tkinter import filedialog
+from collections import defaultdict
 
 try:
     from PIL import Image
@@ -47,7 +48,12 @@ APP_STATE = {
     "admin_pin": None,
     "admin_mode": False,
     "ext_to_category": {},
-    
+
+    # ----------------------------------------------------
+    # Multi-Folder Comparison
+    # ----------------------------------------------------
+    "secondary_folder": None,
+
     # ----------------------------------------------------
     # Optimization: In-Memory Scans
     # ----------------------------------------------------
@@ -64,6 +70,15 @@ APP_STATE = {
     "dup_page": 0,
     "dup_page_size": 25,
 }
+
+def _get_all_folders():
+    """Return a list of all active workspace folders (primary + secondary)."""
+    folders = []
+    if APP_STATE["folder"] and APP_STATE["folder"].is_dir():
+        folders.append(APP_STATE["folder"])
+    if APP_STATE["secondary_folder"] and APP_STATE["secondary_folder"].is_dir():
+        folders.append(APP_STATE["secondary_folder"])
+    return folders
 
 def clear_cache():
     """Wipes the cached memory so the next action triggers a fresh scan."""
@@ -100,24 +115,38 @@ def get_cached_similar_images(threshold: int):
             APP_STATE.get("cached_similar_unavailable", False))
 
 def get_cached_scans():
-    """Returns cached files instantly if already scanned, otherwise does a fast scan."""
+    """Returns cached files instantly if already scanned, otherwise does a fast scan.
+    Merges files from the primary folder AND the comparison folder (if set).
+    """
     if APP_STATE["cached_files"] is None:
-        folder = APP_STATE["folder"]
-        if folder and folder.is_dir():
-            # 1. Recursive Scan (for Dashboard & Duplicates)
-            all_files, _, size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
-            all_files_by_cat, _, _ = bucket_files(all_files, APP_STATE["ext_to_category"], size_cache)
-            
-            # 2. Top-Level Scan (for Organize tab)
-            loose_files_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
-            
-            APP_STATE["cached_files"] = all_files
-            APP_STATE["cached_categories"] = all_files_by_cat
-            APP_STATE["cached_loose_categories"] = loose_files_by_cat
-            APP_STATE["cached_size_cache"] = size_cache
-        else:
+        folders = _get_all_folders()
+        if not folders:
             return [], {}, {}
-            
+
+        merged_files = []
+        merged_size_cache = {}
+        merged_by_cat = defaultdict(list)
+        merged_loose = defaultdict(list)
+
+        for folder in folders:
+            # 1. Recursive scan (for Dashboard & Duplicates)
+            r_files, _, r_size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
+            r_by_cat, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
+            # 2. Top-level scan (for Organize tab)
+            l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+
+            merged_files.extend(r_files)
+            merged_size_cache.update(r_size_cache)
+            for cat, files in r_by_cat.items():
+                merged_by_cat[cat].extend(files)
+            for cat, files in l_by_cat.items():
+                merged_loose[cat].extend(files)
+
+        APP_STATE["cached_files"] = merged_files
+        APP_STATE["cached_categories"] = dict(merged_by_cat)
+        APP_STATE["cached_loose_categories"] = dict(merged_loose)
+        APP_STATE["cached_size_cache"] = merged_size_cache
+
     return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
 
 def _generate_base64_thumb(file_path: Path):
@@ -167,6 +196,7 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
 def get_system_metadata():
     return {
         "folder": str(APP_STATE["folder"]) if APP_STATE["folder"] else "",
+        "secondary_folder": str(APP_STATE["secondary_folder"]) if APP_STATE["secondary_folder"] else "",
         "admin_mode": APP_STATE["admin_mode"],
         "has_pin": bool(APP_STATE["admin_pin"])
     }
@@ -190,6 +220,30 @@ def select_folder_native():
         clear_cache()
         return {"status": "success", "path": chosen}
     return {"status": "cancelled"}
+
+@eel.expose
+def add_comparison_folder():
+    """Open a folder picker and set as secondary comparison folder."""
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes('-topmost', 1)
+    chosen = filedialog.askdirectory(title="Select Comparison Folder", initialdir=str(APP_STATE["folder"] or ""))
+    root.destroy()
+    if not chosen:
+        return {"status": "cancelled"}
+    chosen_path = Path(chosen)
+    if chosen_path.resolve() == APP_STATE["folder"].resolve():
+        return {"status": "error", "message": "Comparison folder must be different from the primary folder."}
+    APP_STATE["secondary_folder"] = chosen_path
+    clear_cache()
+    return {"status": "success", "path": chosen}
+
+@eel.expose
+def remove_comparison_folder():
+    """Remove the secondary comparison folder."""
+    APP_STATE["secondary_folder"] = None
+    clear_cache()
+    return {"status": "success"}
 
 @eel.expose
 def execute_storage_telemetry():
@@ -222,19 +276,23 @@ def execute_storage_telemetry():
 
 @eel.expose
 def get_organize_view_data():
-    folder = APP_STATE["folder"]
-    if not folder or not folder.is_dir():
-        return []
-        
-    # Extracts specifically loose files instantly from memory
-    _, _, loose_files_by_category = get_cached_scans()
-    
-    summary = []
-    for cat_name, file_list in loose_files_by_category.items():
-        if file_list:
-            summary.append({"name": cat_name, "count": len(file_list)})
-            
-    return summary
+    """Returns per-category loose file counts broken down by each active folder.
+    Used by the frontend to show the organize-destination modal."""
+    folders = _get_all_folders()
+    if not folders:
+        return {"folders": [], "categories": {}}
+
+    result = {"folders": [], "categories": {}}
+    for folder in folders:
+        label = folder.name or str(folder)
+        result["folders"].append({"path": str(folder), "label": label})
+        loose, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+        for cat, files in loose.items():
+            if files:
+                entry = result["categories"].setdefault(cat, {})
+                entry[str(folder)] = len(files)
+
+    return result
 
 @eel.expose
 def get_empty_folders_data():
@@ -360,28 +418,77 @@ def get_rule_preview_metrics(rule_type, limit_value):
     return {"count": matched_count, "size_str": format_size(matched_bytes)}
 
 @eel.expose
-def trigger_bulk_organization(chosen_categories):
-    folder = APP_STATE["folder"]
-    if not folder or not folder.is_dir():
-        return {"status": "error", "message": "No workspace folder selected"}
-        
-    _, _, loose_files_by_category = get_cached_scans()
-    
+def trigger_bulk_organization(chosen_categories, destination_folder_str=None):
+    """Organize files into the chosen destination folder.
+
+    If destination_folder_str is None, behaves as before (organize primary only).
+    If a folder path is given, ALL loose files from ALL active folders are moved
+    into categorized subfolders inside that destination.
+    """
+    if destination_folder_str:
+        destination_folder = Path(destination_folder_str)
+        if not destination_folder.is_dir():
+            return {"status": "error", "message": "Destination folder does not exist."}
+    else:
+        destination_folder = APP_STATE["folder"]
+        if not destination_folder or not destination_folder.is_dir():
+            return {"status": "error", "message": "No workspace folder selected"}
+
+    # Gather ALL loose files from every active folder
+    folders = _get_all_folders()
+    merged_loose = defaultdict(list)
+    for f in folders:
+        loose, _, _, _ = scan_folder(f, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+        for cat, files in loose.items():
+            merged_loose[cat].extend(files)
+
     extension_selections = {}
     for category in chosen_categories:
-        extension_selections[category] = loose_files_by_category.get(category, [])
-        
-    plan = build_move_plan(folder, loose_files_by_category, chosen_categories, extension_selections=extension_selections)
+        extension_selections[category] = merged_loose.get(category, [])
+
+    plan = build_move_plan(destination_folder, merged_loose, chosen_categories, extension_selections=extension_selections)
     run_log = []
     for name, dest, files in plan:
         _, _, entries = move_files(files, dest, dry_run=False)
         run_log.extend(entries)
-    
-    if run_log: 
-        save_run_log(folder, run_log)
+
+    if run_log:
+        save_run_log(destination_folder, run_log)
         clear_cache()
-        
+
     return {"status": "success", "moved": len(run_log)}
+
+@eel.expose
+def trigger_separate_organization(folder_categories_map):
+    """Organize files SEPARATELY — each folder's loose files go into that folder's
+    own subfolders. folder_categories_map is a dict like:
+        {"H:/one_image": ["Images", "Videos"], "I:/two_image": ["Documents"]}
+    """
+    total_moved = 0
+    for folder_str, chosen_categories in folder_categories_map.items():
+        folder = Path(folder_str)
+        if not folder.is_dir():
+            continue
+        loose, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+
+        extension_selections = {}
+        for category in chosen_categories:
+            extension_selections[category] = loose.get(category, [])
+
+        plan = build_move_plan(folder, loose, chosen_categories, extension_selections=extension_selections)
+        run_log = []
+        for name, dest, files in plan:
+            _, _, entries = move_files(files, dest, dry_run=False)
+            run_log.extend(entries)
+
+        if run_log:
+            save_run_log(folder, run_log)
+            total_moved += len(run_log)
+
+    if total_moved > 0:
+        clear_cache()
+
+    return {"status": "success", "moved": total_moved}
 
 @eel.expose
 def trigger_separation_organization(rule_type, timing, limit_value):

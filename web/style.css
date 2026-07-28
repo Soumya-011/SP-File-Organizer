@@ -315,3 +315,44 @@ body {
 .table-container tr:hover td {
     background-color: var(--space-bg);
 }
+
+/* ---------------------------------------------------------------
+   Organize Destination Modal
+   --------------------------------------------------------------- */
+.org-dest-option-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 14px 16px;
+    background-color: var(--canvas-card);
+    border: 2px solid var(--stroke-color);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-stack);
+    color: var(--text-primary);
+    transition: all 0.15s ease;
+}
+
+.org-dest-option-btn:hover {
+    border-color: var(--accent-blue);
+    background-color: #EFF6FF;
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.08);
+}
+
+.org-dest-option-btn svg {
+    color: var(--accent-blue);
+}
+
+/* ---------------------------------------------------------------
+   Comparison Folder Bar
+   --------------------------------------------------------------- */
+#comparison-bar {
+    animation: slide-down 0.2s ease;
+}
+
+@keyframes slide-down {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}

@@ -7,6 +7,10 @@ let currentCategoriesMap = [];
 let activeScanType = "exact";
 let currentRenameCategory = null; 
 
+// Multi-folder comparison state
+let hasComparisonFolder = false;
+let organizeFolderData = null; // cached from get_organize_view_data() 
+
 // Global State Caching for Clean Array Pathing & Modal Navigations
 window.currentDuplicateGroups = [];
 window.currentTrashItems = [];
@@ -253,7 +257,17 @@ async function initApplicationContextData() {
     if (typeof eel === "undefined") return;
     const metadata = await eel.get_system_metadata()();
     document.getElementById("current-path-display").innerText = metadata.folder || "No working folder selected.";
-    
+
+    // Comparison folder state
+    hasComparisonFolder = !!metadata.secondary_folder;
+    const compBar = document.getElementById("comparison-bar");
+    if (hasComparisonFolder) {
+        compBar.style.display = "block";
+        document.getElementById("comparison-path-label").innerText = metadata.secondary_folder;
+    } else {
+        compBar.style.display = "none";
+    }
+
     if (!metadata.has_pin) {
         document.getElementById("rename-auth-msg").innerText = "Admin PIN not configured. Add \"admin_pin\" to config.json.";
         document.getElementById("submit-pin-btn").disabled = true;
@@ -364,6 +378,7 @@ async function refreshDashboardTelemetryMetrics() {
     }
 
     const organizeData = await eel.get_organize_view_data()();
+    organizeFolderData = organizeData; // cache for the modal
     const checklistContainer = document.getElementById("organize-checklist-container");
     if (checklistContainer) {
         checklistContainer.innerHTML = "";
@@ -371,17 +386,22 @@ async function refreshDashboardTelemetryMetrics() {
         
         document.getElementById("org-select-all").checked = true;
 
-        if (organizeData.length === 0) {
+        // Build combined category list with total counts across all folders
+        const catMap = organizeData.categories || {};
+        const allCats = Object.keys(catMap);
+
+        if (allCats.length === 0) {
             checklistContainer.innerHTML = '<p style="color:var(--text-secondary); font-size:13.5px;">No loose files to sort currently.</p>';
         } else {
-            organizeData.forEach((cat, index) => {
-                currentCategoriesMap.push(cat.name);
+            allCats.forEach((cat, index) => {
+                currentCategoriesMap.push(cat);
+                const totalCount = Object.values(catMap[cat]).reduce((a, b) => a + b, 0);
                 const row = document.createElement("div");
                 row.style.margin = "8px 0";
                 row.innerHTML = `
                     <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
                         <input type="checkbox" id="cat-checkbox-${index}" class="org-cat-checkbox" checked style="width:16px; height:16px;">
-                        <span>${cat.name} <b style="color:var(--text-secondary); font-weight:500;">(${cat.count} files)</b></span>
+                        <span>${cat} <b style="color:var(--text-secondary); font-weight:500;">(${totalCount} files)</b></span>
                     </label>
                 `;
                 checklistContainer.appendChild(row);
@@ -647,18 +667,71 @@ function initInteractivityHandlers() {
         document.querySelectorAll(".org-cat-checkbox").forEach(cb => cb.checked = e.target.checked);
     });
 
-    document.getElementById("execute-organize-btn").addEventListener("click", async () => {
+    document.getElementById("execute-organize-btn").addEventListener("click", () => {
         let targets = [];
         currentCategoriesMap.forEach((name, idx) => {
             const cb = document.getElementById(`cat-checkbox-${idx}`);
             if (cb && cb.checked) targets.push(name);
         });
         if (targets.length === 0) return alert("Select at least one category checkbox.");
-        
-        const res = await eel.trigger_bulk_organization(targets)();
+
+        // If comparison folder is active, show destination modal
+        if (hasComparisonFolder && organizeFolderData && organizeFolderData.folders.length > 1) {
+            _showOrganizeDestModal(targets);
+        } else {
+            // Single folder — organize directly
+            _executeDirectOrganize(targets);
+        }
+    });
+
+    document.getElementById("add-comparison-btn").addEventListener("click", async () => {
+        const res = await eel.add_comparison_folder()();
         if (res.status === "success") {
+            hasComparisonFolder = true;
+            document.getElementById("comparison-bar").style.display = "block";
+            document.getElementById("comparison-path-label").innerText = res.path;
+            window.showLoader("Scanning both folders, please wait...");
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Execution complete. Reorganized ${res.moved} items into folders.`), 10);
+            window.hideLoader();
+        } else if (res.status === "error") {
+            alert(res.message);
+        }
+    });
+
+    document.getElementById("remove-comparison-btn").addEventListener("click", async () => {
+        await eel.remove_comparison_folder()();
+        hasComparisonFolder = false;
+        document.getElementById("comparison-bar").style.display = "none";
+        window.showLoader("Re-scanning...");
+        await refreshDashboardTelemetryMetrics();
+        window.hideLoader();
+    });
+
+    document.getElementById("execute-separate-org-btn").addEventListener("click", async () => {
+        if (!organizeFolderData) return;
+        const folders = organizeFolderData.folders;
+        const catMap = organizeFolderData.categories;
+        const folderCatsMap = {};
+
+        folders.forEach(f => {
+            const selected = [];
+            document.querySelectorAll(`.sep-cat-cb[data-folder="${f.path}"]:checked`).forEach(cb => {
+                selected.push(cb.value);
+            });
+            if (selected.length > 0) folderCatsMap[f.path] = selected;
+        });
+
+        if (Object.keys(folderCatsMap).length === 0) return alert("Select at least one category for at least one folder.");
+
+        if (!confirm(`Organize separately into each folder's own subfolders?`)) return;
+
+        window.showLoader("Organizing separately...");
+        const res = await eel.trigger_separate_organization(folderCatsMap)();
+        window.hideLoader();
+        if (res.status === "success") {
+            document.getElementById("organize-dest-modal").style.display = "none";
+            await refreshDashboardTelemetryMetrics();
+            setTimeout(() => alert(`Separate organization complete. Moved ${res.moved} items.`), 10);
         } else {
             alert(res.message);
         }
@@ -800,6 +873,73 @@ window.triggerUndoSequence = async function(logPathString) {
         setTimeout(() => alert(`Filesystem adjustments reversed safely. Restored ${res.restored} items.`), 10);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Multi-Folder Organize Destination Modal
+// ---------------------------------------------------------------------------
+function _showOrganizeDestModal(selectedCategories) {
+    if (!organizeFolderData) return;
+    const folders = organizeFolderData.folders;
+    const optionsDiv = document.getElementById("org-dest-options");
+    const separateSection = document.getElementById("org-dest-separate-section");
+    const separateBody = document.getElementById("org-dest-separate-body");
+
+    // Build folder option buttons
+    optionsDiv.innerHTML = "";
+    folders.forEach(f => {
+        const shortLabel = f.label.length > 40 ? f.label.substring(0, 37) + "..." : f.label;
+        const btn = document.createElement("button");
+        btn.className = "org-dest-option-btn";
+        btn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px; height:18px; flex-shrink:0;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+            <div>
+                <div style="font-weight:600; font-size:13px;">Organize into ${shortLabel}</div>
+                <div style="font-size:11px; color:var(--text-secondary);">All files from both folders merged into this location</div>
+            </div>
+        `;
+        btn.addEventListener("click", () => {
+            document.getElementById("organize-dest-modal").style.display = "none";
+            _executeDirectOrganize(selectedCategories, f.path);
+        });
+        optionsDiv.appendChild(btn);
+    });
+
+    // Build "Separate for both" section
+    separateBody.innerHTML = "";
+    const catMap = organizeFolderData.categories;
+    folders.forEach(f => {
+        const folderBlock = document.createElement("div");
+        folderBlock.style.marginBottom = "14px";
+        folderBlock.innerHTML = `
+            <div style="font-size:13px; font-weight:600; margin-bottom:8px; color:var(--text-primary);">${f.label}</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;" id="sep-cats-${f.path.replace(/[^a-zA-Z0-9]/g, '_')}"></div>
+        `;
+        const catContainer = folderBlock.querySelector(`[id^="sep-cats-"]`);
+        Object.keys(catMap).forEach(cat => {
+            const count = catMap[cat][f.path] || 0;
+            const label = document.createElement("label");
+            label.style.cssText = "display:flex; align-items:center; gap:5px; font-size:12px; cursor:pointer; padding:4px 8px; background:var(--space-bg); border:1px solid var(--stroke-color); border-radius:6px;";
+            label.innerHTML = `<input type="checkbox" class="sep-cat-cb" data-folder="${f.path}" value="${cat}" checked style="width:13px; height:13px;"> ${cat} (${count})`;
+            catContainer.appendChild(label);
+        });
+        separateBody.appendChild(folderBlock);
+    });
+
+    separateSection.style.display = "block";
+    document.getElementById("organize-dest-modal").style.display = "flex";
+}
+
+async function _executeDirectOrganize(selectedCategories, destPath = null) {
+    window.showLoader("Organizing files...");
+    const res = await eel.trigger_bulk_organization(selectedCategories, destPath)();
+    window.hideLoader();
+    if (res.status === "success") {
+        await refreshDashboardTelemetryMetrics();
+        setTimeout(() => alert(`Execution complete. Reorganized ${res.moved} items into folders.`), 10);
+    } else {
+        alert(res.message);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Lazy Thumbnail Loading — fetches thumbnails one group at a time on demand

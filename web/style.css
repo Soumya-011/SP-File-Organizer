@@ -203,3 +203,115 @@ body {
 .matrix-card h4 { margin-bottom: 12px; font-size: 14px; }
 .addition-card { border: 2px dashed #CBD5E1; background: transparent; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); cursor: pointer; font-weight: 500; }
 .addition-card:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+
+/* ---------------------------------------------------------------
+   Duplicates Panel — Pagination Bar
+   --------------------------------------------------------------- */
+#dup-pagination-bar #dup-jump-input:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+    outline: none;
+}
+
+#dup-pagination-bar .ui-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* ---------------------------------------------------------------
+   Duplicates Panel — Group Cards & Rows
+   --------------------------------------------------------------- */
+.duplicate-sets-stack > div {
+    transition: box-shadow 0.15s ease;
+}
+
+.duplicate-sets-stack > div:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.dup-row {
+    transition: background-color 0.12s ease;
+    border-radius: 6px;
+}
+
+.dup-row:hover {
+    background-color: var(--space-bg);
+}
+
+.dup-info {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ---------------------------------------------------------------
+   Thumbnail Placeholder — Subtle Pulse While Loading
+   --------------------------------------------------------------- */
+.thumb-placeholder {
+    animation: thumb-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes thumb-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.5; }
+}
+
+.thumb-placeholder img,
+.thumb-placeholder + img {
+    animation: none;
+}
+
+/* ---------------------------------------------------------------
+   Duplicate Sets Scrollable Container
+   --------------------------------------------------------------- */
+.duplicate-sets-stack {
+    max-height: calc(100vh - 340px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #CBD5E1 transparent;
+}
+
+.duplicate-sets-stack::-webkit-scrollbar {
+    width: 6px;
+}
+
+.duplicate-sets-stack::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.duplicate-sets-stack::-webkit-scrollbar-thumb {
+    background-color: #CBD5E1;
+    border-radius: 3px;
+}
+
+.duplicate-sets-stack::-webkit-scrollbar-thumb:hover {
+    background-color: #94A3B8;
+}
+
+/* ---------------------------------------------------------------
+   Tables — Consistent Scrollbar & Row Hover
+   --------------------------------------------------------------- */
+.table-container {
+    max-height: calc(100vh - 340px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #CBD5E1 transparent;
+}
+
+.table-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+.table-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.table-container::-webkit-scrollbar-thumb {
+    background-color: #CBD5E1;
+    border-radius: 3px;
+}
+
+.table-container tr:hover td {
+    background-color: var(--space-bg);
+}

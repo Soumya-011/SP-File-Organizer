@@ -50,9 +50,9 @@ APP_STATE = {
     "ext_to_category": {},
 
     # ----------------------------------------------------
-    # Multi-Folder Comparison
+    # Multi-Folder Comparison (unlimited folders)
     # ----------------------------------------------------
-    "secondary_folder": None,
+    "comparison_folders": [],
 
     # ----------------------------------------------------
     # Optimization: In-Memory Scans
@@ -72,12 +72,13 @@ APP_STATE = {
 }
 
 def _get_all_folders():
-    """Return a list of all active workspace folders (primary + secondary)."""
+    """Return a list of all active workspace folders (primary + comparison)."""
     folders = []
     if APP_STATE["folder"] and APP_STATE["folder"].is_dir():
         folders.append(APP_STATE["folder"])
-    if APP_STATE["secondary_folder"] and APP_STATE["secondary_folder"].is_dir():
-        folders.append(APP_STATE["secondary_folder"])
+    for cf in APP_STATE.get("comparison_folders", []):
+        if cf and cf.is_dir():
+            folders.append(cf)
     return folders
 
 def clear_cache():
@@ -196,7 +197,7 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
 def get_system_metadata():
     return {
         "folder": str(APP_STATE["folder"]) if APP_STATE["folder"] else "",
-        "secondary_folder": str(APP_STATE["secondary_folder"]) if APP_STATE["secondary_folder"] else "",
+        "comparison_folders": [str(f) for f in APP_STATE.get("comparison_folders", [])],
         "admin_mode": APP_STATE["admin_mode"],
         "has_pin": bool(APP_STATE["admin_pin"])
     }
@@ -223,7 +224,7 @@ def select_folder_native():
 
 @eel.expose
 def add_comparison_folder():
-    """Open a folder picker and set as secondary comparison folder."""
+    """Open a folder picker and add to the comparison folder list."""
     root = tk.Tk()
     root.withdraw()
     root.wm_attributes('-topmost', 1)
@@ -232,18 +233,26 @@ def add_comparison_folder():
     if not chosen:
         return {"status": "cancelled"}
     chosen_path = Path(chosen)
-    if chosen_path.resolve() == APP_STATE["folder"].resolve():
-        return {"status": "error", "message": "Comparison folder must be different from the primary folder."}
-    APP_STATE["secondary_folder"] = chosen_path
+    # Prevent duplicates
+    all_existing = [APP_STATE["folder"].resolve()] + [f.resolve() for f in APP_STATE.get("comparison_folders", [])]
+    if chosen_path.resolve() in all_existing:
+        return {"status": "error", "message": "This folder is already in the workspace."}
+    APP_STATE.setdefault("comparison_folders", []).append(chosen_path)
     clear_cache()
     return {"status": "success", "path": chosen}
 
 @eel.expose
-def remove_comparison_folder():
-    """Remove the secondary comparison folder."""
-    APP_STATE["secondary_folder"] = None
+def remove_comparison_folder(folder_path_str):
+    """Remove a specific comparison folder by its path."""
+    target = Path(folder_path_str).resolve()
+    APP_STATE["comparison_folders"] = [f for f in APP_STATE.get("comparison_folders", []) if f.resolve() != target]
     clear_cache()
     return {"status": "success"}
+
+@eel.expose
+def get_comparison_folders():
+    """Return the current list of comparison folder paths."""
+    return [str(f) for f in APP_STATE.get("comparison_folders", [])]
 
 @eel.expose
 def execute_storage_telemetry():

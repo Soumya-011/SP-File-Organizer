@@ -7,8 +7,8 @@ let currentCategoriesMap = [];
 let activeScanType = "exact";
 let currentRenameCategory = null; 
 
-// Multi-folder comparison state
-let hasComparisonFolder = false;
+// Multi-folder comparison state (unlimited folders)
+let comparisonFolders = []; // array of {path, label}
 let organizeFolderData = null; // cached from get_organize_view_data() 
 
 // Global State Caching for Clean Array Pathing & Modal Navigations
@@ -259,14 +259,8 @@ async function initApplicationContextData() {
     document.getElementById("current-path-display").innerText = metadata.folder || "No working folder selected.";
 
     // Comparison folder state
-    hasComparisonFolder = !!metadata.secondary_folder;
-    const compBar = document.getElementById("comparison-bar");
-    if (hasComparisonFolder) {
-        compBar.style.display = "block";
-        document.getElementById("comparison-path-label").innerText = metadata.secondary_folder;
-    } else {
-        compBar.style.display = "none";
-    }
+    comparisonFolders = (metadata.comparison_folders || []).map(p => ({path: p, label: p.split(/[\\/]/).pop() || p}));
+    _renderComparisonBar();
 
     if (!metadata.has_pin) {
         document.getElementById("rename-auth-msg").innerText = "Admin PIN not configured. Add \"admin_pin\" to config.json.";
@@ -676,7 +670,7 @@ function initInteractivityHandlers() {
         if (targets.length === 0) return alert("Select at least one category checkbox.");
 
         // If comparison folder is active, show destination modal
-        if (hasComparisonFolder && organizeFolderData && organizeFolderData.folders.length > 1) {
+        if (comparisonFolders.length > 0 && organizeFolderData && organizeFolderData.folders.length > 1) {
             _showOrganizeDestModal(targets);
         } else {
             // Single folder — organize directly
@@ -687,24 +681,14 @@ function initInteractivityHandlers() {
     document.getElementById("add-comparison-btn").addEventListener("click", async () => {
         const res = await eel.add_comparison_folder()();
         if (res.status === "success") {
-            hasComparisonFolder = true;
-            document.getElementById("comparison-bar").style.display = "block";
-            document.getElementById("comparison-path-label").innerText = res.path;
-            window.showLoader("Scanning both folders, please wait...");
+            comparisonFolders.push({path: res.path, label: res.path.split(/[\\/]/).pop() || res.path});
+            _renderComparisonBar();
+            window.showLoader("Scanning all folders, please wait...");
             await refreshDashboardTelemetryMetrics();
             window.hideLoader();
         } else if (res.status === "error") {
             alert(res.message);
         }
-    });
-
-    document.getElementById("remove-comparison-btn").addEventListener("click", async () => {
-        await eel.remove_comparison_folder()();
-        hasComparisonFolder = false;
-        document.getElementById("comparison-bar").style.display = "none";
-        window.showLoader("Re-scanning...");
-        await refreshDashboardTelemetryMetrics();
-        window.hideLoader();
     });
 
     document.getElementById("execute-separate-org-btn").addEventListener("click", async () => {
@@ -714,8 +698,9 @@ function initInteractivityHandlers() {
         const folderCatsMap = {};
 
         folders.forEach(f => {
+            const escapedPath = f.path.replace(/'/g, "\\'").replace(/"/g, '&quot;');
             const selected = [];
-            document.querySelectorAll(`.sep-cat-cb[data-folder="${f.path}"]:checked`).forEach(cb => {
+            document.querySelectorAll(`.sep-cat-cb[data-folder="${escapedPath}"]:checked`).forEach(cb => {
                 selected.push(cb.value);
             });
             if (selected.length > 0) folderCatsMap[f.path] = selected;
@@ -850,6 +835,7 @@ window.openImagePreview = async function(gIdx, fIdx) {
 };
 
 document.addEventListener("keydown", (e) => {
+    // Close image preview on Escape
     const modal = document.getElementById("image-preview-modal");
     if (modal.style.display === "flex") {
         const groupFiles = window.currentDuplicateGroups[window.currentPreviewGidx].files;
@@ -864,6 +850,12 @@ document.addEventListener("keydown", (e) => {
             modal.style.display = "none";
         }
     }
+
+    // Close organize destination modal on Escape
+    const orgModal = document.getElementById("organize-dest-modal");
+    if (orgModal && orgModal.style.display === "flex" && e.key === "Escape") {
+        orgModal.style.display = "none";
+    }
 });
 
 window.triggerUndoSequence = async function(logPathString) {
@@ -875,6 +867,48 @@ window.triggerUndoSequence = async function(logPathString) {
 };
 
 // ---------------------------------------------------------------------------
+// Comparison Bar — Renders folder chips with individual remove buttons
+// ---------------------------------------------------------------------------
+function _renderComparisonBar() {
+    const compBar = document.getElementById("comparison-bar");
+    const chipsContainer = document.getElementById("comparison-folder-chips");
+    if (!compBar || !chipsContainer) return;
+
+    if (comparisonFolders.length === 0) {
+        compBar.style.display = "none";
+        return;
+    }
+
+    compBar.style.display = "block";
+    chipsContainer.innerHTML = "";
+
+    comparisonFolders.forEach((f, idx) => {
+        const shortLabel = f.label.length > 45 ? f.label.substring(0, 42) + "..." : f.label;
+        const chip = document.createElement("div");
+        chip.className = "comparison-chip";
+        chip.innerHTML = `
+            <span title="${f.path}">${shortLabel}</span>
+            <button class="comparison-chip-remove" data-idx="${idx}" title="Remove this folder">&times;</button>
+        `;
+        chipsContainer.appendChild(chip);
+    });
+
+    // Attach remove handlers
+    chipsContainer.querySelectorAll(".comparison-chip-remove").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const idx = parseInt(btn.getAttribute("data-idx"), 10);
+            const folderToRemove = comparisonFolders[idx];
+            comparisonFolders.splice(idx, 1);
+            await eel.remove_comparison_folder(folderToRemove.path)();
+            _renderComparisonBar();
+            window.showLoader("Re-scanning...");
+            await refreshDashboardTelemetryMetrics();
+            window.hideLoader();
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Multi-Folder Organize Destination Modal
 // ---------------------------------------------------------------------------
 function _showOrganizeDestModal(selectedCategories) {
@@ -883,6 +917,7 @@ function _showOrganizeDestModal(selectedCategories) {
     const optionsDiv = document.getElementById("org-dest-options");
     const separateSection = document.getElementById("org-dest-separate-section");
     const separateBody = document.getElementById("org-dest-separate-body");
+    const cancelRow = document.getElementById("org-dest-cancel-row");
 
     // Build folder option buttons
     optionsDiv.innerHTML = "";
@@ -894,7 +929,7 @@ function _showOrganizeDestModal(selectedCategories) {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px; height:18px; flex-shrink:0;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
             <div>
                 <div style="font-weight:600; font-size:13px;">Organize into ${shortLabel}</div>
-                <div style="font-size:11px; color:var(--text-secondary);">All files from both folders merged into this location</div>
+                <div style="font-size:11px; color:var(--text-secondary);">All files from all folders merged into this location</div>
             </div>
         `;
         btn.addEventListener("click", () => {
@@ -904,29 +939,43 @@ function _showOrganizeDestModal(selectedCategories) {
         optionsDiv.appendChild(btn);
     });
 
-    // Build "Separate for both" section
+    // Build "Separate for each" section
     separateBody.innerHTML = "";
     const catMap = organizeFolderData.categories;
     folders.forEach(f => {
+        const escapedPath = f.path.replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const folderBlock = document.createElement("div");
         folderBlock.style.marginBottom = "14px";
         folderBlock.innerHTML = `
             <div style="font-size:13px; font-weight:600; margin-bottom:8px; color:var(--text-primary);">${f.label}</div>
-            <div style="display:flex; flex-wrap:wrap; gap:6px;" id="sep-cats-${f.path.replace(/[^a-zA-Z0-9]/g, '_')}"></div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px;"></div>
         `;
-        const catContainer = folderBlock.querySelector(`[id^="sep-cats-"]`);
+        const catContainer = folderBlock.querySelector("div:last-child");
         Object.keys(catMap).forEach(cat => {
             const count = catMap[cat][f.path] || 0;
             const label = document.createElement("label");
             label.style.cssText = "display:flex; align-items:center; gap:5px; font-size:12px; cursor:pointer; padding:4px 8px; background:var(--space-bg); border:1px solid var(--stroke-color); border-radius:6px;";
-            label.innerHTML = `<input type="checkbox" class="sep-cat-cb" data-folder="${f.path}" value="${cat}" checked style="width:13px; height:13px;"> ${cat} (${count})`;
+            label.innerHTML = `<input type="checkbox" class="sep-cat-cb" data-folder="${escapedPath}" value="${cat}" checked style="width:13px; height:13px;"> ${cat} (${count})`;
             catContainer.appendChild(label);
         });
         separateBody.appendChild(folderBlock);
     });
 
-    separateSection.style.display = "block";
-    document.getElementById("organize-dest-modal").style.display = "flex";
+    // Show separate section + cancel row (hidden if only single folder)
+    if (folders.length > 1) {
+        separateSection.style.display = "block";
+    } else {
+        separateSection.style.display = "none";
+    }
+    cancelRow.style.display = "flex";
+    cancelRow.style.justifyContent = "flex-end";
+    const modalEl = document.getElementById("organize-dest-modal");
+
+    // Close on backdrop click (outside the card)
+    modalEl.onclick = function(e) {
+        if (e.target === modalEl) modalEl.style.display = "none";
+    };
+    modalEl.style.display = "flex";
 }
 
 async function _executeDirectOrganize(selectedCategories, destPath = null) {

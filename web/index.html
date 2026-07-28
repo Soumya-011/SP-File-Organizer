@@ -46,15 +46,14 @@
                 </div>
                 <div style="display:flex; gap:8px; align-items:center; flex-shrink:0;">
                     <button class="ui-btn secondary" id="change-workspace-btn">Change Folder</button>
-                    <button class="ui-btn secondary" id="add-comparison-btn" title="Add a second folder to compare & organize together">+ Compare Folder</button>
+                    <button class="ui-btn secondary" id="add-comparison-btn" title="Add one or more folders to compare & organize together">+ Compare Folder</button>
                 </div>
             </header>
             <div id="comparison-bar" style="display:none; padding:8px 24px; background:#EFF6FF; border-bottom:1px solid #BFDBFE; font-size:13px;">
-                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
                     <svg viewBox="0 0 24 24" fill="none" stroke="#2563EB" stroke-width="2" style="width:16px; height:16px; flex-shrink:0;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
-                    <span style="color:#1E40AF; font-weight:600;">Comparison:</span>
-                    <code id="comparison-path-label" style="color:#1E3A8A; background:#DBEAFE; padding:3px 10px; border-radius:6px; font-size:12px; word-break:break-all;"></code>
-                    <button class="ui-btn secondary" id="remove-comparison-btn" style="padding:3px 10px; font-size:11px; color:#DC2626; border-color:#FECACA;">Remove</button>
+                    <span style="color:#1E40AF; font-weight:600;">Comparing:</span>
+                    <div id="comparison-folder-chips" style="display:flex; flex-wrap:wrap; gap:6px; flex:1; min-width:0;"></div>
                 </div>
             </div>
 
@@ -397,7 +396,10 @@
 
     <div id="organize-dest-modal" style="display:none; align-items:center; justify-content:center; position:fixed; inset:0; background:rgba(11,18,32,0.65); z-index:9999;">
         <div class="ui-card" style="width:560px; max-width:92vw;">
-            <h3 style="margin-top:0; font-size:16px;">Choose Organize Destination</h3>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <h3 style="margin-top:0; font-size:16px;">Choose Organize Destination</h3>
+                <button onclick="document.getElementById('organize-dest-modal').style.display='none'" style="background:none; border:none; color:var(--text-secondary); font-size:22px; cursor:pointer; line-height:1; padding:4px 8px; border-radius:4px;" title="Close">&times;</button>
+            </div>
             <p style="color:var(--text-secondary); font-size:12.5px; margin-bottom:16px;">Where should the categorized subfolders be created?</p>
             
             <div id="org-dest-options" style="display:flex; flex-direction:column; gap:10px; margin-bottom:16px;"></div>
@@ -405,9 +407,13 @@
             <div id="org-dest-separate-section" style="display:none; border-top:1px solid var(--stroke-color); padding-top:14px; margin-top:6px;">
                 <h4 style="font-size:14px; margin:0 0 10px 0;">Select categories per folder:</h4>
                 <div id="org-dest-separate-body" style="max-height:280px; overflow-y:auto;"></div>
-                <div style="margin-top:14px; display:flex; justify-content:flex-end;">
+                <div style="margin-top:14px; display:flex; justify-content:flex-end; gap:8px;">
+                    <button class="ui-btn secondary" onclick="document.getElementById('organize-dest-modal').style.display='none'">Cancel</button>
                     <button class="ui-btn primary" id="execute-separate-org-btn">Organize Separately</button>
                 </div>
+            </div>
+            <div id="org-dest-cancel-row" style="display:none; margin-top:14px; justify-content:flex-end;">
+                <button class="ui-btn secondary" onclick="document.getElementById('organize-dest-modal').style.display='none'">Cancel</button>
             </div>
         </div>
     </div>

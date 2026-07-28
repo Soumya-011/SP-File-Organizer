@@ -96,10 +96,16 @@ class _DisjointSet:
 
 
 def find_similar_images(files: list, threshold: int = 10, max_workers: int = None):
+    """Returns (groups, unreadable, unavailable). `unavailable` is True only
+    when Pillow itself isn't installed - distinct from "no images found" or
+    "no matches found", both of which are legitimate empty results."""
+    if not PIL_AVAILABLE:
+        return [], [], True
+
     # 1. Filter out non-images
     images = [f for f in files if is_image_file(f)]
-    if not images or not PIL_AVAILABLE:
-        return [], [], []
+    if not images:
+        return [], [], False
 
     # 2. Hash all images concurrently (This takes physical time based on disk speed!)
     hashes, unreadable = concurrent_hash_all(images, _perceptual_hash, max_workers)
@@ -134,7 +140,7 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
         if len(current_group) > 1:
             groups.append(current_group)
 
-    return groups, unreadable, []
+    return groups, unreadable, False
 
 
 def ask_similarity_threshold() -> int:

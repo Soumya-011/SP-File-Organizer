@@ -407,11 +407,29 @@ async function refreshDashboardTelemetryMetrics() {
         const dupContainer = document.getElementById("duplicates-render-container");
         if (dupContainer) {
             dupContainer.innerHTML = "";
-            
+
+            if (dupResponse.error) {
+                dupContainer.innerHTML += `
+                    <div style="background: #FEF2F2; color: #B91C1C; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FECACA; font-size: 13px;">
+                        <b>Similar-image scan unavailable:</b> ${dupResponse.error}
+                    </div>
+                `;
+                window.hideLoader();
+                return;
+            }
+
             if (dupResponse.total_groups > dupGroups.length) {
                 dupContainer.innerHTML += `
                     <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
                         <b>High Volume Detected:</b> Found ${dupResponse.total_groups.toLocaleString()} duplicate sets. To prevent UI freezing, only the first ${dupGroups.length} are shown. Purge these to automatically load the next batch!
+                    </div>
+                `;
+            }
+
+            if (dupResponse.unreadable_count > 0) {
+                dupContainer.innerHTML += `
+                    <div style="background: #FFFBEB; color: #B45309; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 12.5px;">
+                        Note: ${dupResponse.unreadable_count} image(s) could not be read (corrupt, locked, or an unsupported format like HEIC without the pillow-heif plugin) and were skipped.
                     </div>
                 `;
             }

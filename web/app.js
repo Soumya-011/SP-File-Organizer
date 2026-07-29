@@ -627,7 +627,7 @@ async function refreshDashboardTelemetryMetrics() {
         } else {
             historyData.history.forEach(run => {
                 const tr = document.createElement("tr");
-                tr.innerHTML = `<td style="padding:10px;"><b>${run.label}</b></td><td style="padding:10px;">Moved <b>${run.count}</b> files/folders</td><td style="padding:10px;"><button class="ui-btn secondary" onclick="triggerUndoSequence('${run.path.replace(/\\/g, '\\\\')}')" style="padding:4px 10px; font-size:11.5px;">Undo Action</button></td>`;
+                tr.innerHTML = `<td style="padding:10px;"><b>${run.label}</b></td><td style="padding:10px;">Moved <b>${run.count}</b> files/folders</td><td style="padding:10px;"><button class="ui-btn secondary" onclick="triggerUndoSequence('${run.path.replace(/\\/g, '\\\\')}', '${run.label}', ${run.count})" style="padding:4px 10px; font-size:11.5px;">Undo Action</button></td>`;
                 historyBody.appendChild(tr);
             });
         }
@@ -949,14 +949,94 @@ document.addEventListener("keydown", (e) => {
     if (orgModal && orgModal.style.display === "flex" && e.key === "Escape") {
         orgModal.style.display = "none";
     }
+
+    // Close undo confirm modal on Escape
+    const undoModal = document.getElementById("undo-confirm-modal");
+    if (undoModal && undoModal.style.display === "flex" && e.key === "Escape") {
+        undoModal.style.display = "none";
+        _pendingUndoLogPath = null;
+    }
+
+    // Close organize preview modal on Escape
+    const orgPreviewModal = document.getElementById("organize-preview-modal");
+    if (orgPreviewModal && orgPreviewModal.style.display === "flex" && e.key === "Escape") {
+        orgPreviewModal.style.display = "none";
+    }
 });
 
-window.triggerUndoSequence = async function(logPathString) {
-    if (confirm("Reverse adjustments logged inside this execution batch?")) {
-        const res = await eel.execute_undo_operation(logPathString)();
+// --- Undo Confirmation Modal Logic ---
+let _pendingUndoLogPath = null;
+
+function _shortPath(p, maxLen) {
+    if (p.length <= maxLen) return p;
+    const parts = p.replace(/\\/g, "/").split("/");
+    if (parts.length <= 2) return p;
+    return ".../" + parts.slice(-2).join("/");
+}
+
+function _showUndoConfirmModal(logPath, label, fileCount) {
+    _pendingUndoLogPath = logPath;
+    const modal = document.getElementById("undo-confirm-modal");
+    document.getElementById("undo-log-label").innerText = label;
+    document.getElementById("undo-file-count").innerText = " \u2014 " + fileCount + " file(s) will be restored";
+
+    // Show loader while fetching details
+    const tbody = document.getElementById("undo-preview-tbody");
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#6B7280;">Loading file details...</td></tr>';
+    modal.style.display = "flex";
+
+    // Fetch details async
+    eel.get_undo_log_details(logPath)().then(res => {
+        if (res.status === "success" && res.entries.length > 0) {
+            const limit = 100;
+            const entries = res.entries.slice(0, limit);
+            tbody.innerHTML = "";
+            entries.forEach(e => {
+                const tr = document.createElement("tr");
+                tr.style.borderBottom = "1px solid var(--stroke-color)";
+                tr.innerHTML = `
+                    <td style="padding:6px 12px; font-weight:500; color:#111827; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${e.file_name}">${e.file_name}</td>
+                    <td style="padding:6px 12px; color:#6B7280; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${e.destination}">${_shortPath(e.destination, 40)}</td>
+                    <td style="padding:6px 12px; color:#059669; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${e.source}">${_shortPath(e.source, 40)}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            if (res.entries.length > limit) {
+                document.getElementById("undo-preview-too-many").style.display = "block";
+                document.getElementById("undo-total-count").innerText = res.entries.length;
+            } else {
+                document.getElementById("undo-preview-too-many").style.display = "none";
+            }
+        } else {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#6B7280;">No file details available.</td></tr>';
+        }
+    }).catch(() => {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#DC2626;">Failed to load file details.</td></tr>';
+    });
+}
+
+// Wire up undo modal buttons
+document.addEventListener("DOMContentLoaded", () => {
+    const undoModal = document.getElementById("undo-confirm-modal");
+    document.getElementById("undo-modal-close-btn").addEventListener("click", () => { undoModal.style.display = "none"; _pendingUndoLogPath = null; });
+    document.getElementById("undo-cancel-btn").addEventListener("click", () => { undoModal.style.display = "none"; _pendingUndoLogPath = null; });
+    undoModal.addEventListener("click", (e) => { if (e.target === undoModal) { undoModal.style.display = "none"; _pendingUndoLogPath = null; } });
+
+    document.getElementById("undo-confirm-btn").addEventListener("click", async () => {
+        if (!_pendingUndoLogPath) return;
+        const logPath = _pendingUndoLogPath;
+        undoModal.style.display = "none";
+        window.showLoader("Undoing file moves...");
+        const res = await eel.execute_undo_operation(logPath)();
+        window.hideLoader();
         await refreshDashboardTelemetryMetrics();
         showToast(`Undo complete. Restored ${res.restored} items.`, "success");
-    }
+        _pendingUndoLogPath = null;
+    });
+});
+
+window.triggerUndoSequence = async function(logPathString, label, count) {
+    _showUndoConfirmModal(logPathString, label || "Undo", count || 0);
 };
 
 // ---------------------------------------------------------------------------
@@ -1071,16 +1151,87 @@ function _showOrganizeDestModal(selectedCategories) {
     modalEl.style.display = "flex";
 }
 
-async function _executeDirectOrganize(selectedCategories, destPath = null) {
-    window.showLoader("Organizing files...");
-    const res = await eel.trigger_bulk_organization(selectedCategories, destPath)();
-    window.hideLoader();
-    if (res.status === "success") {
-        await refreshDashboardTelemetryMetrics();
-        showToast(`Reorganized ${res.moved} items into folders.`, "success");
-    } else {
-        showToast(res.message, "error");
-    }
+// --- Organize Preview Modal Logic ---
+let _pendingOrgCategories = null;
+let _pendingOrgDestPath = null;
+
+function _showOrganizePreviewModal(selectedCategories, destPath) {
+    _pendingOrgCategories = selectedCategories;
+    _pendingOrgDestPath = destPath;
+    const modal = document.getElementById("organize-preview-modal");
+    const tbody = document.getElementById("org-preview-tbody");
+    const summaryEl = document.getElementById("org-preview-summary");
+
+    summaryEl.innerText = "Loading preview...";
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#6B7280;">Scanning files for preview...</td></tr>';
+    modal.style.display = "flex";
+
+    eel.get_organize_preview(selectedCategories)().then(res => {
+        if (res.status === "success") {
+            // Build per-category summary
+            const catCounts = {};
+            res.entries.forEach(e => { catCounts[e.category] = (catCounts[e.category] || 0) + 1; });
+            const catParts = Object.entries(catCounts).map(([c, n]) => n + " " + c).join(", ");
+            summaryEl.innerText = res.total + " file(s) will be moved: " + catParts;
+
+            const limit = 150;
+            const entries = res.entries.slice(0, limit);
+            tbody.innerHTML = "";
+            entries.forEach(e => {
+                const tr = document.createElement("tr");
+                tr.style.borderBottom = "1px solid var(--stroke-color)";
+                tr.innerHTML = `
+                    <td style="padding:6px 12px; font-weight:500; color:#111827; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${e.file_name}">${e.file_name}</td>
+                    <td style="padding:6px 12px; color:#6B7280; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${e.source_folder}">${_shortPath(e.source_folder, 35)}</td>
+                    <td style="padding:6px 12px;"><span class="tag" style="background:#EFF6FF; color:#2563EB; border:1px solid #BFDBFE; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">${e.category}</span></td>
+                    <td style="padding:6px 12px; text-align:right; color:#6B7280; font-size:11.5px;">${e.file_size}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            if (res.entries.length > limit) {
+                document.getElementById("org-preview-too-many").style.display = "block";
+                document.getElementById("org-preview-total-count").innerText = res.entries.length;
+            } else {
+                document.getElementById("org-preview-too-many").style.display = "none";
+            }
+        } else {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#DC2626;">Failed to load preview.</td></tr>';
+        }
+    }).catch(() => {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#DC2626;">Failed to load preview.</td></tr>';
+    });
+}
+
+// Wire up organize preview modal buttons
+document.addEventListener("DOMContentLoaded", () => {
+    const orgPreviewModal = document.getElementById("organize-preview-modal");
+    document.getElementById("org-preview-close-btn").addEventListener("click", () => { orgPreviewModal.style.display = "none"; });
+    document.getElementById("org-preview-cancel-btn").addEventListener("click", () => { orgPreviewModal.style.display = "none"; });
+    orgPreviewModal.addEventListener("click", (e) => { if (e.target === orgPreviewModal) orgPreviewModal.style.display = "none"; });
+
+    document.getElementById("org-preview-confirm-btn").addEventListener("click", async () => {
+        if (!_pendingOrgCategories) return;
+        const cats = _pendingOrgCategories;
+        const dest = _pendingOrgDestPath;
+        orgPreviewModal.style.display = "none";
+        // Execute the actual organize
+        window.showLoader("Organizing files...");
+        const res = await eel.trigger_bulk_organization(cats, dest)();
+        window.hideLoader();
+        if (res.status === "success") {
+            await refreshDashboardTelemetryMetrics();
+            showToast(`Reorganized ${res.moved} items into folders.`, "success");
+        } else {
+            showToast(res.message, "error");
+        }
+        _pendingOrgCategories = null;
+        _pendingOrgDestPath = null;
+    });
+});
+
+function _executeDirectOrganize(selectedCategories, destPath) {
+    // Show preview modal instead of executing directly
+    _showOrganizePreviewModal(selectedCategories, destPath);
 }
 
 // ---------------------------------------------------------------------------

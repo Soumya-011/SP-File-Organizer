@@ -381,6 +381,37 @@ def get_organize_view_data():
     return result
 
 @eel.expose
+def get_organize_preview(chosen_categories):
+    """Return the list of files that will be moved for each category,
+    for showing a preview before the user confirms organizing."""
+    folders = _get_all_folders()
+    merged_loose = defaultdict(list)
+    for f in folders:
+        loose, _, _, _ = scan_folder(f, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+        for cat, files in loose.items():
+            merged_loose[cat].extend(files)
+
+    preview = []
+    for cat in chosen_categories:
+        files = merged_loose.get(cat, [])
+        for fp in files:
+            try:
+                preview.append({
+                    "category": cat,
+                    "file_name": fp.name,
+                    "source_folder": str(fp.parent),
+                    "file_size": format_size(fp.stat().st_size),
+                })
+            except OSError:
+                preview.append({
+                    "category": cat,
+                    "file_name": fp.name,
+                    "source_folder": str(fp.parent),
+                    "file_size": "N/A",
+                })
+    return {"status": "success", "entries": preview, "total": len(preview)}
+
+@eel.expose
 def get_empty_folders_data():
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir(): return []
@@ -934,6 +965,30 @@ def restore_from_bin(path_strs):
     if restored > 0:
         clear_cache()
     return {"status": "success", "restored": restored}
+
+@eel.expose
+def get_undo_log_details(log_path_str):
+    """Return the file-level entries from a specific run log, for previewing
+    what will be undone before the user confirms."""
+    log_path = Path(log_path_str)
+    if not log_path.exists():
+        return {"status": "error", "message": "Log file not found.", "entries": []}
+    try:
+        import json as _json
+        entries = _json.loads(log_path.read_text())
+        details = []
+        for e in entries:
+            src = Path(e["source"])
+            dst = Path(e["destination"])
+            details.append({
+                "file_name": src.name,
+                "source": str(src.parent) if src.parent != Path(".") else str(src),
+                "destination": str(dst.parent) if dst.parent != Path(".") else str(dst),
+                "destination_name": dst.name,
+            })
+        return {"status": "success", "entries": details}
+    except Exception as ex:
+        return {"status": "error", "message": str(ex), "entries": []}
 
 @eel.expose
 def execute_undo_operation(log_path_str):

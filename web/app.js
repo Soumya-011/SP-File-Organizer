@@ -26,12 +26,101 @@ let dupTotalGroups = 0;
 // Global Loader Wrappers
 window.showLoader = function(msg = "Processing...") {
     document.getElementById("loader-text").innerText = msg;
+    document.getElementById("loader-progress-bar-wrap").style.display = "none";
+    document.getElementById("loader-counter").style.display = "none";
+    document.getElementById("loader-progress-bar").style.width = "0%";
     document.getElementById("global-loader").style.display = "flex";
 };
 
 window.hideLoader = function() {
     document.getElementById("global-loader").style.display = "none";
+    document.getElementById("loader-progress-bar-wrap").style.display = "none";
+    document.getElementById("loader-counter").style.display = "none";
+    document.getElementById("loader-progress-bar").style.width = "0%";
 };
+
+window.updateLoaderProgress = function(msg, current, total) {
+    // Update the loader text with real-time progress from Python
+    const textEl = document.getElementById("loader-text");
+    const barWrap = document.getElementById("loader-progress-bar-wrap");
+    const bar = document.getElementById("loader-progress-bar");
+    const counter = document.getElementById("loader-counter");
+    if (textEl) textEl.innerText = msg;
+    if (total > 0 && current >= 0) {
+        barWrap.style.display = "block";
+        counter.style.display = "block";
+        const pct = Math.min(100, Math.round((current / total) * 100));
+        bar.style.width = pct + "%";
+        counter.innerText = current + " / " + total + " (" + pct + "%)";
+    } else {
+        barWrap.style.display = "none";
+        counter.style.display = "none";
+    }
+};
+
+// Eel calls this from Python to push real-time progress
+// Python calls: eel._on_python_progress(message, current, total)()
+if (typeof eel !== "undefined") {
+    eel.expose(_on_python_progress);
+}
+function _on_python_progress(message, current, total) {
+    // Only update if loader is visible (operation is in progress)
+    if (document.getElementById("global-loader").style.display !== "none") {
+        updateLoaderProgress(message, current, total);
+    }
+}
+
+// Toast Notification System (replaces browser alert())
+window.showToast = function(message, type = "success", duration = 3500) {
+    const container = document.getElementById("toast-container");
+    if (!container) return;
+
+    const colors = {
+        success: { bg: "#065F46", border: "#059669", icon: "\u2713" },
+        error:   { bg: "#7F1D1D", border: "#DC2626", icon: "\u2717" },
+        info:    { bg: "#1E3A5F", border: "#2563EB", icon: "\u2139" },
+        warning: { bg: "#78350F", border: "#D97706", icon: "\u26A0" }
+    };
+    const c = colors[type] || colors.info;
+
+    const toast = document.createElement("div");
+    toast.style.cssText = `
+        pointer-events: auto; display:flex; align-items:center; gap:10px;
+        padding:12px 18px; border-radius:10px; font-size:14px; font-weight:500;
+        color:#fff; background:${c.bg}; border-left:4px solid ${c.border};
+        box-shadow:0 8px 24px rgba(0,0,0,0.18); min-width:280px; max-width:440px;
+        transform:translateX(120%); transition:transform 0.35s cubic-bezier(0.22,1,0.36,1), opacity 0.3s;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+    toast.innerHTML = `
+        <span style="font-size:16px; font-weight:700; opacity:0.9;">${c.icon}</span>
+        <span style="flex:1; line-height:1.4;">${message}</span>
+    `;
+
+    // Auto-close on click
+    toast.style.cursor = "pointer";
+    toast.onclick = () => dismissToast(toast);
+
+    container.appendChild(toast);
+
+    // Slide in
+    requestAnimationFrame(() => {
+        toast.style.transform = "translateX(0)";
+    });
+
+    // Auto dismiss
+    const timer = setTimeout(() => dismissToast(toast), duration);
+    toast._dismissTimer = timer;
+};
+
+function dismissToast(toast) {
+    if (toast._dismissed) return;
+    toast._dismissed = true;
+    clearTimeout(toast._dismissTimer);
+    toast.style.transform = "translateX(120%)";
+    toast.style.opacity = "0";
+    setTimeout(() => toast.remove(), 400);
+}
 
 document.addEventListener("DOMContentLoaded", () => {
     initViewPanelNavigation();
@@ -113,7 +202,7 @@ function initAdminAndRenameHandlers() {
         if (res.status === "success") {
             unlockAdminUI();
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     };
 
@@ -145,8 +234,8 @@ function initAdminAndRenameHandlers() {
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
         
-        if (!arg1 && op !== "replace") return alert("Please enter text argument");
-        if (!currentRenameCategory) return alert("No category selected");
+        if (!arg1 && op !== "replace") return showToast("Please enter text argument", "warning");
+        if (!currentRenameCategory) return showToast("No category selected", "warning");
         
         const changed = await eel.preview_rename(currentRenameCategory, op, arg1, arg2)();
 
@@ -178,7 +267,7 @@ function initAdminAndRenameHandlers() {
         
         await populateRenameCategories();
         await refreshDashboardTelemetryMetrics();
-        setTimeout(() => alert(`Successfully renamed ${count} files.`), 10);
+        showToast(`Successfully renamed ${count} files.`, "success");
     });
 }
 
@@ -226,14 +315,14 @@ function initCategoryHandlers() {
     document.getElementById("save-category-btn").addEventListener("click", async () => {
         const name = document.getElementById("cat-name-input").value.trim();
         const exts = document.getElementById("cat-exts-input").value.trim();
-        if(!name || !exts) return alert("Category Name and Extensions are required fields.");
+        if(!name || !exts) return showToast("Category Name and Extensions are required.", "warning");
         
         const res = await eel.update_category(name, exts)();
         if(res.status === "success") {
             document.getElementById("category-modal").style.display = "none";
             await refreshDashboardTelemetryMetrics();
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 }
@@ -593,17 +682,17 @@ function initInteractivityHandlers() {
 
     document.getElementById("execute-mismatch-btn").addEventListener("click", async () => {
         const selected = Array.from(document.querySelectorAll(".mismatch-cat-checkbox:checked")).map(cb => cb.value);
-        if(selected.length === 0) return alert("Select at least one category to fix.");
+        if(selected.length === 0) return showToast("Select at least one category to fix.", "warning");
 
         const count = await eel.fix_mismatched_files(selected)();
         document.getElementById("mismatch-modal").style.display = "none";
         await refreshDashboardTelemetryMetrics();
-        setTimeout(() => alert(`Fixed ${count} misplaced files inside target directories.`), 10);
+        showToast(`Fixed ${count} misplaced files inside target directories.`, "success");
     });
 
     document.getElementById("vacuum-btn").addEventListener("click", async () => {
         const emptyFolders = await eel.get_empty_folders_data()();
-        if (emptyFolders.length === 0) return alert("No empty folders found natively inside the current workspace.");
+        if (emptyFolders.length === 0) return showToast("No empty folders found in the workspace.", "info");
         
         const container = document.getElementById("vacuum-checklist");
         container.innerHTML = "";
@@ -631,15 +720,15 @@ function initInteractivityHandlers() {
 
     document.getElementById("execute-vacuum-btn").addEventListener("click", async () => {
         const selected = Array.from(document.querySelectorAll(".vacuum-folder-checkbox:checked")).map(cb => cb.value);
-        if(selected.length === 0) return alert("Select at least one empty folder to clean.");
+        if(selected.length === 0) return showToast("Select at least one empty folder to clean.", "warning");
 
         const res = await eel.purge_selected_empty_folders(selected)();
         if(res.status === "success") {
             document.getElementById("vacuum-modal").style.display = "none";
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`), 10);
+            showToast(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`, "success");
         } else {
-            alert(res.message || "Error cleaning folders.");
+            showToast(res.message || "Error cleaning folders.", "error");
         }
     });
 
@@ -667,7 +756,7 @@ function initInteractivityHandlers() {
             const cb = document.getElementById(`cat-checkbox-${idx}`);
             if (cb && cb.checked) targets.push(name);
         });
-        if (targets.length === 0) return alert("Select at least one category checkbox.");
+        if (targets.length === 0) return showToast("Select at least one category checkbox.", "warning");
 
         // If comparison folder is active, show destination modal
         if (comparisonFolders.length > 0 && organizeFolderData && organizeFolderData.folders.length > 1) {
@@ -687,7 +776,7 @@ function initInteractivityHandlers() {
             await refreshDashboardTelemetryMetrics();
             window.hideLoader();
         } else if (res.status === "error") {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 
@@ -706,7 +795,7 @@ function initInteractivityHandlers() {
             if (selected.length > 0) folderCatsMap[f.path] = selected;
         });
 
-        if (Object.keys(folderCatsMap).length === 0) return alert("Select at least one category for at least one folder.");
+        if (Object.keys(folderCatsMap).length === 0) return showToast("Select at least one category for at least one folder.", "warning");
 
         if (!confirm(`Organize separately into each folder's own subfolders?`)) return;
 
@@ -716,9 +805,9 @@ function initInteractivityHandlers() {
         if (res.status === "success") {
             document.getElementById("organize-dest-modal").style.display = "none";
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Separate organization complete. Moved ${res.moved} items.`), 10);
+            showToast(`Separate organization complete. Moved ${res.moved} items.`, "success");
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 
@@ -726,12 +815,14 @@ function initInteractivityHandlers() {
         const val = document.getElementById("size-input-value").value;
         const timing = document.querySelector('input[name="size-timing"]:checked').value;
         
+        window.showLoader("Organizing by size...");
         const res = await eel.trigger_separation_organization("size", timing, val)();
+        window.hideLoader();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Size organization sequence resolved. Isolated ${res.moved} files.`), 10);
+            showToast(`Size organization resolved. Isolated ${res.moved} files.`, "success");
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 
@@ -739,12 +830,14 @@ function initInteractivityHandlers() {
         const val = document.getElementById("age-input-value").value;
         const timing = document.querySelector('input[name="age-timing"]:checked').value;
         
+        window.showLoader("Organizing by age...");
         const res = await eel.trigger_separation_organization("age", timing, val)();
+        window.hideLoader();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Age organization sequence resolved. Isolated ${res.moved} files.`), 10);
+            showToast(`Age organization resolved. Isolated ${res.moved} files.`, "success");
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 
@@ -767,14 +860,14 @@ function initInteractivityHandlers() {
                 targets.push(window.currentDuplicateGroups[gIdx].files[fIdx].path);
             }
         });
-        if (targets.length === 0) return alert("No items selected for cleanup.");
+        if (targets.length === 0) return showToast("No items selected for cleanup.", "warning");
         if (confirm(`Move these ${targets.length} duplicate file(s) into the recovery bin?`)) {
             const res = await eel.purge_selected_duplicates(targets)();
             if (res.status === "success") {
                 await refreshDashboardTelemetryMetrics();
-                setTimeout(() => alert(`Asset cleanups processed successfully.`), 10);
+                showToast(`Duplicate cleanups processed successfully.`, "success");
             } else {
-                alert(res.message);
+                showToast(res.message, "error");
             }
         }
     });
@@ -787,14 +880,14 @@ function initInteractivityHandlers() {
                 targets.push(window.currentTrashItems[idx].path);
             }
         });
-        if (targets.length === 0) return alert("Select files using the checkboxes first.");
+        if (targets.length === 0) return showToast("Select files using the checkboxes first.", "warning");
         
         const res = await eel.restore_from_bin(targets)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Successfully restored ${res.restored} item(s) back to original locations.`), 10);
+            showToast(`Restored ${res.restored} item(s) back to original locations.`, "success");
         } else {
-            alert(res.message);
+            showToast(res.message, "error");
         }
     });
 
@@ -802,7 +895,7 @@ function initInteractivityHandlers() {
         if (confirm("Attention! This action completely flushes your hidden recovery files permanently from disk memory. Proceed?")) {
             const res = await eel.empty_trash_completely()();
             await refreshDashboardTelemetryMetrics();
-            setTimeout(() => alert(`Trash directory cleared completely. Purged ${res.flushed} system files permanently.`), 10);
+            showToast(`Trash cleared. Purged ${res.flushed} files permanently.`, "success");
         }
     });
 }
@@ -862,7 +955,7 @@ window.triggerUndoSequence = async function(logPathString) {
     if (confirm("Reverse adjustments logged inside this execution batch?")) {
         const res = await eel.execute_undo_operation(logPathString)();
         await refreshDashboardTelemetryMetrics();
-        setTimeout(() => alert(`Filesystem adjustments reversed safely. Restored ${res.restored} items.`), 10);
+        showToast(`Undo complete. Restored ${res.restored} items.`, "success");
     }
 };
 
@@ -984,9 +1077,9 @@ async function _executeDirectOrganize(selectedCategories, destPath = null) {
     window.hideLoader();
     if (res.status === "success") {
         await refreshDashboardTelemetryMetrics();
-        setTimeout(() => alert(`Execution complete. Reorganized ${res.moved} items into folders.`), 10);
+        showToast(`Reorganized ${res.moved} items into folders.`, "success");
     } else {
-        alert(res.message);
+        showToast(res.message, "error");
     }
 }
 

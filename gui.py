@@ -42,6 +42,39 @@ from rename import build_rename_plan, execute_rename_plan
 
 eel.init('web')
 
+# --- Real-time progress bridge ---
+# Python calls _push_ui_progress() during long operations.
+# JS registers a global handler via eel.expose(_on_python_progress).
+_progress_counter = 0
+_progress_lock = __import__('threading').Lock()
+
+
+def _push_ui_progress(message: str, current: int = 0, total: int = 0):
+    """Send a progress update to the JS frontend.
+
+    Throttled to at most once every 200ms to avoid flooding the Eel channel.
+    """
+    global _progress_counter
+    import time
+    with _progress_lock:
+        # Throttle: only send if >=200ms since last send
+        now = time.time()
+        if not hasattr(_push_ui_progress, '_last_time'):
+            _push_ui_progress._last_time = 0
+        if now - _push_ui_progress._last_time < 0.2:
+            return
+        _push_ui_progress._last_time = now
+    try:
+        eel._on_python_progress(message, current, total)()
+    except Exception:
+        pass  # frontend not listening (normal during CLI mode)
+
+
+@eel.expose
+def _on_python_progress(message, current, total):
+    pass  # placeholder; JS side receives the call
+
+
 APP_STATE = {
     "folder": None,
     "config_path": None,
@@ -500,10 +533,18 @@ def trigger_bulk_organization(chosen_categories, destination_folder_str=None):
         extension_selections[category] = merged_loose.get(category, [])
 
     plan = build_move_plan(destination_folder, merged_loose, chosen_categories, extension_selections=extension_selections)
+
+    # Count total files for progress tracking
+    total_files = sum(len(files) for _, _, files in plan)
+    done_files = 0
     run_log = []
-    for name, dest, files in plan:
-        _, _, entries = move_files(files, dest, dry_run=False)
+
+    for idx, (name, dest, files) in enumerate(plan):
+        _push_ui_progress(f"Moving category '{name}' ({idx+1}/{len(plan)})...", done_files, total_files)
+        moved, _, entries = move_files(files, dest, dry_run=False)
+        done_files += moved
         run_log.extend(entries)
+        _push_ui_progress(f"Moved '{name}' ({done_files}/{total_files} files)", done_files, total_files)
 
     if run_log:
         save_run_log(destination_folder, run_log)
@@ -518,10 +559,12 @@ def trigger_separate_organization(folder_categories_map):
         {"H:/one_image": ["Images", "Videos"], "I:/two_image": ["Documents"]}
     """
     total_moved = 0
-    for folder_str, chosen_categories in folder_categories_map.items():
+    all_folders = list(folder_categories_map.items())
+    for fi, (folder_str, chosen_categories) in enumerate(all_folders):
         folder = Path(folder_str)
         if not folder.is_dir():
             continue
+        _push_ui_progress(f"Scanning folder {fi+1}/{len(all_folders)}...", total_moved, -1)
         loose, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
 
         extension_selections = {}
@@ -533,10 +576,11 @@ def trigger_separate_organization(folder_categories_map):
         for name, dest, files in plan:
             _, _, entries = move_files(files, dest, dry_run=False)
             run_log.extend(entries)
+            total_moved += len(entries)
+            _push_ui_progress(f"Moved '{name}' in {folder.name}...", total_moved, -1)
 
         if run_log:
             save_run_log(folder, run_log)
-            total_moved += len(run_log)
 
     if total_moved > 0:
         clear_cache()
@@ -554,16 +598,19 @@ def trigger_separation_organization(rule_type, timing, limit_value):
         "size_mb": val if rule_type == "size" else None, "age_days": val if rule_type == "age" else None
     }
     
+    _push_ui_progress(f"Computing {rule_type} separation rules...", 0, -1)
     _, _, loose_files_by_category = get_cached_scans()
     run_log = []
 
     if timing == "before":
         plan, _ = build_pre_plan(loose_files_by_category, folder, rules)
+        _push_ui_progress(f"Executing Pre-Separation ({rule_type})...", 0, -1)
         run_log = execute_plan(plan, dry_run=False, label="Pre-Separation")
     else:
         all_categories = list(APP_STATE["category_map"].keys()) + ["Others"]
         mock_category_plan = [(cat, folder / cat, loose_files_by_category.get(cat, [])) for cat in all_categories]
         plan = build_post_plan(all_categories, mock_category_plan, folder, rules)
+        _push_ui_progress(f"Executing Post-Separation ({rule_type})...", 0, -1)
         run_log = execute_plan(plan, dry_run=False, label="Post-Separation")
 
     if run_log: 

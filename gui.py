@@ -119,17 +119,43 @@ def _get_all_folders():
     return folders
 
 def clear_cache():
-    """Wipes the cached memory so the next action triggers a fresh scan."""
+    """Wipes the file scan caches so the next action triggers a fresh directory scan.
+
+    Does NOT clear duplicate/similar image caches — those are preserved because:
+      - Organize, rename, and fix-misplaced only move/rename files; the actual
+        file content (and therefore duplicates) does not change.
+      - The SQLite hash cache (#4) makes re-scanning fast, but the directory
+        walk + grouping still causes noticeable lag on large folders.
+      - Operations that genuinely change the file population (undo restore,
+        trash, purge duplicates) call invalidate_duplicate_cache() explicitly.
+    """
     APP_STATE["cached_files"] = None
     APP_STATE["cached_categories"] = None
     APP_STATE["cached_loose_categories"] = None
     APP_STATE["cached_per_folder_loose"] = None
+    APP_STATE["cached_size_cache"] = None
+    # cached_duplicates and cached_similar are intentionally preserved
+
+
+def invalidate_duplicate_cache():
+    """Explicitly clear only the duplicate and similar image caches.
+
+    Call this ONLY when the file population actually changes:
+      - Files added back (undo restore)
+      - Files removed (trashed / purged duplicates)
+      - Workspace changed entirely (new folder)
+    """
     APP_STATE["cached_duplicates"] = None
     APP_STATE["cached_similar"] = None
     APP_STATE["cached_similar_threshold"] = None
     APP_STATE["cached_similar_unreadable"] = 0
     APP_STATE["cached_similar_unavailable"] = False
-    APP_STATE["cached_size_cache"] = None
+
+
+def clear_all_cache():
+    """Full cache wipe for workspace changes (new folder, config reload, etc.)."""
+    clear_cache()
+    invalidate_duplicate_cache()
 
 def get_cached_duplicates():
     """Exact-duplicate groups, computed once per scan and reused until clear_cache()."""
@@ -274,7 +300,7 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
     APP_STATE["exclude_patterns"] = excludes
     APP_STATE["admin_pin"] = pin
     APP_STATE["ext_to_category"] = build_ext_to_category(cmap)
-    clear_cache()
+    clear_all_cache()
 
 @eel.expose
 def get_system_metadata():
@@ -301,7 +327,7 @@ def select_folder_native():
     root.destroy()
     if chosen:
         APP_STATE["folder"] = Path(chosen)
-        clear_cache()
+        clear_all_cache()
         return {"status": "success", "path": chosen}
     return {"status": "cancelled"}
 
@@ -321,7 +347,7 @@ def add_comparison_folder():
     if chosen_path.resolve() in all_existing:
         return {"status": "error", "message": "This folder is already in the workspace."}
     APP_STATE.setdefault("comparison_folders", []).append(chosen_path)
-    clear_cache()
+    clear_all_cache()
     return {"status": "success", "path": chosen}
 
 @eel.expose
@@ -329,7 +355,7 @@ def remove_comparison_folder(folder_path_str):
     """Remove a specific comparison folder by its path."""
     target = Path(folder_path_str).resolve()
     APP_STATE["comparison_folders"] = [f for f in APP_STATE.get("comparison_folders", []) if f.resolve() != target]
-    clear_cache()
+    clear_all_cache()
     return {"status": "success"}
 
 @eel.expose
@@ -512,6 +538,38 @@ def purge_selected_empty_folders(folder_paths):
         clear_cache()
         
     return {"status": "success", "purged": moved}
+
+@eel.expose
+def delete_empty_folders_permanently(folder_paths):
+    """Permanently delete empty folders (bypass trash — no undo available).
+    
+    Unlike purge_selected_empty_folders which moves to trash for undo,
+    this uses shutil.rmtree to delete folders directly from disk."""
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir(): return {"status": "error", "message": "No workspace folder"}
+    
+    paths_to_remove = [Path(p) for p in folder_paths]
+    paths_to_remove.sort(key=lambda p: len(p.parts), reverse=True)  # deepest first
+    
+    deleted = 0
+    failed = 0
+    
+    for p in paths_to_remove:
+        if not p.exists(): continue
+        try:
+            # Verify the folder is still empty before permanent delete
+            if any(item.exists() for item in p.iterdir()):
+                failed += 1
+                continue
+            shutil.rmtree(str(p))
+            deleted += 1
+        except Exception:
+            failed += 1
+    
+    if deleted > 0:
+        clear_cache()
+        
+    return {"status": "success", "deleted": deleted, "failed": failed}
 
 @eel.expose
 def get_mismatched_data():
@@ -883,6 +941,7 @@ def purge_selected_duplicates(file_paths):
     if log_entries: 
         save_run_log(folder, log_entries)
         clear_cache()
+        invalidate_duplicate_cache()  # files removed → duplicate groups changed
     return {"status": "success", "purged": moved}
 
 @eel.expose
@@ -994,6 +1053,7 @@ def restore_from_bin(path_strs):
         if ok: restored += 1
     if restored > 0:
         clear_cache()
+        invalidate_duplicate_cache()  # files added back → duplicate groups may change
     return {"status": "success", "restored": restored}
 
 @eel.expose
@@ -1024,6 +1084,8 @@ def get_undo_log_details(log_path_str):
 def execute_undo_operation(log_path_str):
     restored, total = restore_run(Path(log_path_str))
     clear_cache()
+    if restored > 0:
+        invalidate_duplicate_cache()  # files restored → duplicate groups may change
     return {"status": "success", "restored": restored, "total": total}
 
 @eel.expose
@@ -1031,6 +1093,13 @@ def empty_trash_completely():
     count = empty_trash(APP_STATE["folder"])
     clear_cache()
     return {"status": "success", "flushed": count}
+
+@eel.expose
+def force_refresh_duplicates():
+    """Force a fresh duplicate/similar scan on next tab visit.
+    Called when user clicks 'Re-scan' in the duplicates tab."""
+    invalidate_duplicate_cache()
+    return {"status": "success"}
 
 def launch_gui(config_path: Path, initial_folder: Path = None):
     initialize_runtime_configs(config_path, initial_folder)

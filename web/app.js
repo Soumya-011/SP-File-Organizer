@@ -336,7 +336,12 @@ window.editCategory = function(name, exts) {
 };
 
 window.deleteCategory = async function(name) {
-    if(confirm(`Are you sure you want to remove custom config overrides for '${name}'?`)) {
+    const proceed = await _showSimpleConfirmModal(
+        `Remove custom config overrides for '${name}'?`,
+        "This will restore the default extensions for this category.",
+        "#D97706"
+    );
+    if (proceed) {
         await eel.remove_category(name)();
         await refreshDashboardTelemetryMetrics();
     }
@@ -732,14 +737,32 @@ function initInteractivityHandlers() {
         const selected = Array.from(document.querySelectorAll(".vacuum-folder-checkbox:checked")).map(cb => cb.value);
         if(selected.length === 0) return showToast("Select at least one empty folder to clean.", "warning");
 
-        const res = await eel.purge_selected_empty_folders(selected)();
-        if(res.status === "success") {
-            document.getElementById("vacuum-modal").style.display = "none";
-            await refreshDashboardTelemetryMetrics();
-            showToast(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`, "success");
+        const permanentDelete = document.getElementById("vacuum-permanent-delete").checked;
+
+        if (permanentDelete) {
+            const res = await eel.delete_empty_folders_permanently(selected)();
+            if(res.status === "success") {
+                document.getElementById("vacuum-modal").style.display = "none";
+                await refreshDashboardTelemetryMetrics();
+                let msg = `Permanently deleted ${res.deleted} empty folder(s).`;
+                if (res.failed > 0) msg += ` ${res.failed} folder(s) skipped (no longer empty).`;
+                showToast(msg, "success");
+            } else {
+                showToast(res.message || "Error deleting folders.", "error");
+            }
         } else {
-            showToast(res.message || "Error cleaning folders.", "error");
+            const res = await eel.purge_selected_empty_folders(selected)();
+            if(res.status === "success") {
+                document.getElementById("vacuum-modal").style.display = "none";
+                await refreshDashboardTelemetryMetrics();
+                showToast(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`, "success");
+            } else {
+                showToast(res.message || "Error cleaning folders.", "error");
+            }
         }
+
+        // Reset the permanent delete checkbox after action
+        document.getElementById("vacuum-permanent-delete").checked = false;
     });
 
     document.getElementById("change-workspace-btn").addEventListener("click", async () => {
@@ -807,7 +830,12 @@ function initInteractivityHandlers() {
 
         if (Object.keys(folderCatsMap).length === 0) return showToast("Select at least one category for at least one folder.", "warning");
 
-        if (!confirm(`Organize separately into each folder's own subfolders?`)) return;
+        const proceed = await _showSimpleConfirmModal(
+            "Organize separately into each folder's own subfolders?",
+            "Each folder's loose files will be moved into categorized subfolders within that same folder.",
+            "#2563EB"
+        );
+        if (!proceed) return;
 
         window.showLoader("Organizing separately...");
         const res = await eel.trigger_separate_organization(folderCatsMap)();
@@ -871,15 +899,26 @@ function initInteractivityHandlers() {
             }
         });
         if (targets.length === 0) return showToast("No items selected for cleanup.", "warning");
-        if (confirm(`Move these ${targets.length} duplicate file(s) into the recovery bin?`)) {
-            const res = await eel.purge_selected_duplicates(targets)();
-            if (res.status === "success") {
-                await refreshDashboardTelemetryMetrics();
-                showToast(`Duplicate cleanups processed successfully.`, "success");
-            } else {
-                showToast(res.message, "error");
-            }
+
+        // Show confirmation via toast-style approach
+        const proceed = await _showPurgeConfirmModal(targets.length);
+        if (!proceed) return;
+
+        const res = await eel.purge_selected_duplicates(targets)();
+        if (res.status === "success") {
+            await refreshDashboardTelemetryMetrics();
+            showToast(`Moved ${res.purged} duplicate file(s) to the Recycle Bin.`, "success");
+        } else {
+            showToast(res.message, "error");
         }
+    });
+
+    // Re-scan duplicates button
+    document.getElementById("dup-rescan-btn").addEventListener("click", async () => {
+        await eel.force_refresh_duplicates()();
+        dupCurrentPage = 0;
+        showToast("Re-scanning duplicates...", "info");
+        await refreshDashboardTelemetryMetrics();
     });
 
     document.getElementById("restore-bin-btn").addEventListener("click", async () => {
@@ -902,11 +941,18 @@ function initInteractivityHandlers() {
     });
 
     document.getElementById("empty-bin-btn").addEventListener("click", async () => {
-        if (confirm("Attention! This action completely flushes your hidden recovery files permanently from disk memory. Proceed?")) {
-            const res = await eel.empty_trash_completely()();
-            await refreshDashboardTelemetryMetrics();
-            showToast(`Trash cleared. Purged ${res.flushed} files permanently.`, "success");
-        }
+        document.getElementById("empty-trash-confirm-modal").style.display = "flex";
+    });
+
+    document.getElementById("empty-trash-cancel-btn").addEventListener("click", () => {
+        document.getElementById("empty-trash-confirm-modal").style.display = "none";
+    });
+
+    document.getElementById("empty-trash-confirm-btn").addEventListener("click", async () => {
+        document.getElementById("empty-trash-confirm-modal").style.display = "none";
+        const res = await eel.empty_trash_completely()();
+        await refreshDashboardTelemetryMetrics();
+        showToast(`Trash cleared. Purged ${res.flushed} files permanently.`, "success");
     });
 }
 
@@ -982,6 +1028,90 @@ function _shortPath(p, maxLen) {
     const parts = p.replace(/\\/g, "/").split("/");
     if (parts.length <= 2) return p;
     return ".../" + parts.slice(-2).join("/");
+}
+
+// ---------------------------------------------------------------------------
+// Generic Simple Confirm Modal (replaces all confirm() calls)
+// ---------------------------------------------------------------------------
+function _showSimpleConfirmModal(title, message, accentColor) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.id = "simple-confirm-overlay";
+        overlay.style.cssText = "position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:99998; align-items:center; justify-content:center; backdrop-filter:blur(2px); display:flex;";
+
+        const color = accentColor || "#2563EB";
+
+        overlay.innerHTML = `
+            <div style="background:#fff; border-radius:14px; width:400px; max-width:92vw; box-shadow:0 20px 60px rgba(0,0,0,0.25);">
+                <div style="display:flex; align-items:center; gap:10px; padding:20px 24px; border-bottom:1px solid var(--stroke-color);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" style="width:22px; height:22px; flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                    <h3 style="margin:0; font-size:15px; font-weight:700; color:#111827;">${title}</h3>
+                </div>
+                <div style="padding:18px 24px;">
+                    <p style="margin:0; font-size:13.5px; color:#6B7280;">${message}</p>
+                </div>
+                <div style="padding:14px 24px; border-top:1px solid var(--stroke-color); display:flex; justify-content:flex-end; gap:10px;">
+                    <button class="sc-cancel-btn ui-btn secondary">Cancel</button>
+                    <button class="sc-confirm-btn ui-btn primary" style="background:${color}; border-color:${color}; color:#fff;">Confirm</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        overlay.querySelector(".sc-cancel-btn").onclick = () => { overlay.remove(); resolve(false); };
+        overlay.querySelector(".sc-confirm-btn").onclick = () => { overlay.remove(); resolve(true); };
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) { overlay.remove(); resolve(false); }
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Purge Duplicates Confirmation Modal (replaces confirm() for duplicate cleanup)
+// ---------------------------------------------------------------------------
+function _showPurgeConfirmModal(count) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("empty-trash-confirm-modal");
+        if (!modal) { resolve(true); return; }
+
+        // Reuse the modal pattern — show inline confirmation
+        const overlay = document.createElement("div");
+        overlay.id = "purge-confirm-overlay";
+        overlay.style.cssText = "position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:99998; align-items:center; justify-content:center; backdrop-filter:blur(2px); display:flex;";
+
+        overlay.innerHTML = `
+            <div style="background:#fff; border-radius:14px; width:420px; max-width:92vw; box-shadow:0 20px 60px rgba(0,0,0,0.25);">
+                <div style="display:flex; align-items:center; gap:10px; padding:20px 24px; border-bottom:1px solid var(--stroke-color);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#D97706" stroke-width="2" style="width:22px; height:22px; flex-shrink:0;"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    <h3 style="margin:0; font-size:16px; font-weight:700; color:#111827;">Purge Duplicate Files</h3>
+                </div>
+                <div style="padding:20px 24px;">
+                    <div style="padding:12px 16px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:8px; font-size:13.5px; color:#92400E; margin-bottom:14px;">
+                        Move <b>${count}</b> selected file(s) to the Recycle Bin? You can restore them later from the History tab.
+                    </div>
+                </div>
+                <div style="padding:14px 24px; border-top:1px solid var(--stroke-color); display:flex; justify-content:flex-end; gap:10px;">
+                    <button id="purge-modal-cancel" class="ui-btn secondary">Cancel</button>
+                    <button id="purge-modal-confirm" class="ui-btn primary" style="background:#D97706; border-color:#D97706; color:#fff;">Yes, Move to Recycle Bin</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        document.getElementById("purge-modal-cancel").onclick = () => {
+            overlay.remove();
+            resolve(false);
+        };
+        document.getElementById("purge-modal-confirm").onclick = () => {
+            overlay.remove();
+            resolve(true);
+        };
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) { overlay.remove(); resolve(false); }
+        });
+    });
 }
 
 function _showUndoConfirmModal(logPath, label, fileCount) {

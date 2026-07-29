@@ -387,13 +387,23 @@ async function refreshDashboardTelemetryMetrics() {
     if (typeof eel === "undefined") return;
     
     // --- TELEMETRY AND CATEGORY RENDERING ---
+    // This is the LIGHT version — it does NOT compute duplicates (which requires
+    // hashing every file). Duplicate count is fetched separately only when the
+    // user views the Duplicates tab.
     const data = await eel.execute_storage_telemetry()();
     if (data.error) return;
 
     document.getElementById("count-total-files").innerText = (data.total_files || 0).toLocaleString();
-    document.getElementById("count-dup-sets").innerText = (data.duplicate_sets || 0).toLocaleString();
     document.getElementById("count-trash-items").innerText = (data.trash_count || 0).toLocaleString();
     document.getElementById("total-storage-tally").innerText = data.total_size_str || "0 B";
+
+    // Duplicate count: fetch lightweight (uses cache if available, skips full hash)
+    try {
+        const dupCount = await eel.get_duplicate_count()();
+        document.getElementById("count-dup-sets").innerText = (dupCount || 0).toLocaleString();
+    } catch(e) {
+        // Silently skip if backend busy
+    }
 
     const chartRing = document.getElementById("donut-render-target");
     const legendList = document.getElementById("legend-render-target");

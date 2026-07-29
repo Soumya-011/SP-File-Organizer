@@ -95,6 +95,8 @@ APP_STATE = {
     "cached_files": None,
     "cached_categories": None,
     "cached_loose_categories": None,
+    "cached_per_folder_loose": None,
+    "cached_size_cache": None,
     "cached_duplicates": None,
     "cached_similar": None,
     "cached_similar_threshold": None,
@@ -121,6 +123,7 @@ def clear_cache():
     APP_STATE["cached_files"] = None
     APP_STATE["cached_categories"] = None
     APP_STATE["cached_loose_categories"] = None
+    APP_STATE["cached_per_folder_loose"] = None
     APP_STATE["cached_duplicates"] = None
     APP_STATE["cached_similar"] = None
     APP_STATE["cached_similar_threshold"] = None
@@ -166,13 +169,14 @@ def get_cached_scans():
             # bucket_files now returns 4 values (added file_to_cat)
             r_by_cat, _, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
             l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
-            return r_files, r_size_cache, r_by_cat, l_by_cat
+            return r_files, r_size_cache, r_by_cat, l_by_cat, folder
 
         # (#2) Parallel folder scanning
         merged_files = []
         merged_size_cache = {}
         merged_by_cat = defaultdict(list)
         merged_loose = defaultdict(list)
+        per_folder_loose = {}  # NEW: per-folder loose breakdown for organize view
 
         if len(folders) > 1:
             with ThreadPoolExecutor(max_workers=min(len(folders), 4)) as pool:
@@ -180,17 +184,19 @@ def get_cached_scans():
         else:
             results = [_scan_one_folder(f) for f in folders]
 
-        for r_files, r_size_cache, r_by_cat, l_by_cat in results:
+        for r_files, r_size_cache, r_by_cat, l_by_cat, folder in results:
             merged_files.extend(r_files)
             merged_size_cache.update(r_size_cache)
             for cat, files in r_by_cat.items():
                 merged_by_cat[cat].extend(files)
             for cat, files in l_by_cat.items():
                 merged_loose[cat].extend(files)
+            per_folder_loose[str(folder)] = l_by_cat
 
         APP_STATE["cached_files"] = merged_files
         APP_STATE["cached_categories"] = dict(merged_by_cat)
         APP_STATE["cached_loose_categories"] = dict(merged_loose)
+        APP_STATE["cached_per_folder_loose"] = per_folder_loose
         APP_STATE["cached_size_cache"] = merged_size_cache
 
     return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
@@ -342,8 +348,7 @@ def execute_storage_telemetry():
     
     if not all_files:
         return {"total_size_str": "0 B", "total_files": 0, "duplicate_sets": 0, "trash_count": 0, "categories": []}
-        
-    duplicate_groups = get_cached_duplicates()
+    
     sizes = compute_storage_usage(files_by_category)
     total_bytes = sum(sizes.values())
     categories_data = []
@@ -354,16 +359,29 @@ def execute_storage_telemetry():
             "name": cat, "size_str": format_size(byte_size), "bytes": byte_size, "percentage": pct
         })
         
+    trash_count = len(list_trash_items(folder))
+    
     return {
         "total_size_str": format_size(total_bytes), "total_files": len(all_files),
-        "duplicate_sets": len(duplicate_groups), "trash_count": len(list_trash_items(folder)),
-        "categories": categories_data
+        "trash_count": trash_count, "categories": categories_data
     }
+
+@eel.expose
+def get_duplicate_count():
+    """Lightweight endpoint: returns duplicate count from cache ONLY.
+    Does NOT trigger a full duplicate scan (no file hashing).
+    Returns 0 if cache is empty — the count will update when the user
+    visits the Duplicates tab."""
+    cached = APP_STATE.get("cached_duplicates")
+    if cached is not None:
+        return len(cached)
+    return 0  # Don't trigger the expensive scan here
 
 @eel.expose
 def get_organize_view_data():
     """Returns per-category loose file counts broken down by each active folder.
-    Used by the frontend to show the organize-destination modal."""
+    Used by the frontend to show the organize-destination modal.
+    Now reuses cached scan data to avoid redundant folder scans."""
     folders = _get_all_folders()
     if not folders:
         return {"folders": [], "categories": {}}
@@ -372,11 +390,23 @@ def get_organize_view_data():
     for folder in folders:
         label = folder.name or str(folder)
         result["folders"].append({"path": str(folder), "label": label})
-        loose, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
-        for cat, files in loose.items():
-            if files:
-                entry = result["categories"].setdefault(cat, {})
-                entry[str(folder)] = len(files)
+
+    # Reuse cached per-folder loose categories if available (instant)
+    per_folder_loose = APP_STATE.get("cached_per_folder_loose")
+    if per_folder_loose:
+        for folder_str, loose in per_folder_loose.items():
+            for cat, files in loose.items():
+                if files:
+                    entry = result["categories"].setdefault(cat, {})
+                    entry[folder_str] = len(files)
+    else:
+        # Fallback: scan each folder (only happens on first call)
+        for folder in folders:
+            loose, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+            for cat, files in loose.items():
+                if files:
+                    entry = result["categories"].setdefault(cat, {})
+                    entry[str(folder)] = len(files)
 
     return result
 

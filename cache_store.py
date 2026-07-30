@@ -9,6 +9,13 @@ Three cache subsystems in one SQLite database:
 
 All caches use (file_path, mtime, size) as the composite key so stale entries
 are automatically ignored when a file changes or is replaced.
+
+Fix 4: _get_conn() now uses thread-local persistent connections instead of
+opening/closing per call. Each thread (including ProcessPoolExecutor workers)
+gets its own connection naturally via threading.local().
+
+Fix 2: All _batch() functions and prune_stale_thumbs() use temp-table + JOIN
+instead of dynamic OR-chains, so they scale past SQLite's SQLITE_MAX_VARIABLE_NUMBER.
 """
 
 import json
@@ -22,6 +29,9 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 _DB_PATH = None
 _DB_LOCK = threading.Lock()
+
+# Fix 4: thread-local persistent connection — avoids open/close per call.
+_local = threading.local()
 
 # Cache TTL: entries older than this (seconds) are considered stale.
 # 0 = never expire (rely solely on mtime/size key).
@@ -47,11 +57,21 @@ def init_cache_db(folder: Path):
 
 
 def _get_conn() -> sqlite3.Connection:
-    db_path = _get_db_path()
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-8192")  # 8 MB page cache
+    """Return a thread-local persistent connection.
+
+    Each thread (Eel greenlet, background scan thread, ProcessPoolExecutor
+    worker) gets its own connection via threading.local(). The connection
+    is opened once and reused for the lifetime of that thread, eliminating
+    the overhead of open/PRAGMA/close on every single call.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        db_path = _get_db_path()
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8192")  # 8 MB page cache
+        _local.conn = conn
     return conn
 
 
@@ -95,8 +115,8 @@ def _ensure_tables():
                 CREATE INDEX IF NOT EXISTS idx_hist_label ON history_manifest (label);
             """)
             conn.commit()
-        finally:
-            conn.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +131,6 @@ def get_cached_thumb(file_path: Path, mtime: float, size: int) -> str:
                 "SELECT b64_data FROM thumbnail_cache WHERE file_path=? AND mtime=? AND size=?",
                 (str(file_path), mtime, size)
             ).fetchone()
-            conn.close()
             return row[0] if row else ""
         except Exception:
             return ""
@@ -129,25 +148,37 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
                 (str(file_path), mtime, size, b64_data)
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
 
 def get_cached_thumbs_batch(entries: list) -> dict:
     """Batch-fetch thumbnails. entries = [(path_str, mtime, size), ...].
-    Returns {path_str: b64_data}."""
+    Returns {path_str: b64_data}. Uses a temp table + JOIN instead of a
+    dynamic OR-chain so this scales past SQLite's SQLITE_MAX_VARIABLE_NUMBER."""
     if not entries:
         return {}
     with _DB_LOCK:
         try:
             conn = _get_conn()
-            rows = conn.execute(
-                f"SELECT file_path, b64_data FROM thumbnail_cache WHERE "
-                f"({' OR '.join('(file_path=? AND mtime=? AND size=?)' for _ in entries)})",
-                tuple(v for e in entries for v in e)
-            ).fetchall()
-            conn.close()
+            conn.execute(""
+                "CREATE TEMP TABLE IF NOT EXISTS _thumb_lookup ("
+                "    file_path TEXT, mtime REAL, size INTEGER"
+                ")"
+            "")
+            conn.execute("DELETE FROM _thumb_lookup")
+            conn.executemany(
+                "INSERT INTO _thumb_lookup (file_path, mtime, size) VALUES (?,?,?)",
+                entries
+            )
+            rows = conn.execute(""
+                "SELECT t.file_path, t.b64_data"
+                " FROM thumbnail_cache t"
+                " JOIN _thumb_lookup k"
+                "   ON t.file_path = k.file_path"
+                "  AND t.mtime = k.mtime"
+                "  AND t.size = k.size"
+            "").fetchall()
             return {r[0]: r[1] for r in rows}
         except Exception:
             return {}
@@ -165,29 +196,41 @@ def put_cached_thumbs_batch(entries: list):
                 entries
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
 
 def prune_stale_thumbs(valid_keys: set):
-    """Remove thumbnail entries whose (path, mtime, size) key is no longer valid."""
+    """Remove thumbnail entries whose (path, mtime, size) key is no longer valid.
+    Uses a temp table + NOT EXISTS subquery instead of a dynamic IN-list
+    so this scales past SQLite's SQLITE_MAX_VARIABLE_NUMBER."""
     with _DB_LOCK:
         try:
             conn = _get_conn()
-            # Delete entries not in valid_keys
             if valid_keys:
-                placeholders = ",".join("?" * len(valid_keys))
-                conn.execute(
-                    f"DELETE FROM thumbnail_cache WHERE (file_path || '|' || mtime || '|' || size) NOT IN "
-                    f"(SELECT file_path || '|' || mtime || '|' || size FROM thumbnail_cache WHERE "
-                    f"(file_path || '|' || mtime || '|' || size) IN ({placeholders}))",
+                # Temp table of current valid keys
+                conn.execute(""
+                    "CREATE TEMP TABLE IF NOT EXISTS _valid_thumb_keys ("
+                    "    file_path TEXT, mtime REAL, size INTEGER"
+                    ")"
+                "")
+                conn.execute("DELETE FROM _valid_thumb_keys")
+                conn.executemany(
+                    "INSERT INTO _valid_thumb_keys (file_path, mtime, size) VALUES (?,?,?)",
                     list(valid_keys)
                 )
+                conn.execute(""
+                    "DELETE FROM thumbnail_cache"
+                    " WHERE NOT EXISTS ("
+                    "    SELECT 1 FROM _valid_thumb_keys v"
+                    "    WHERE thumbnail_cache.file_path = v.file_path"
+                    "      AND thumbnail_cache.mtime = v.mtime"
+                    "      AND thumbnail_cache.size = v.size"
+                    ")"
+                "")
             else:
                 conn.execute("DELETE FROM thumbnail_cache")
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -204,7 +247,6 @@ def get_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int):
                 "SELECT hash_value FROM hash_cache WHERE file_path=? AND hash_type=? AND mtime=? AND size=?",
                 (str(file_path), hash_type, mtime, size)
             ).fetchone()
-            conn.close()
             return row[0] if row else None
         except Exception:
             return None
@@ -212,18 +254,32 @@ def get_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int):
 
 def get_cached_hashes_batch(entries: list) -> dict:
     """Batch-fetch hashes. entries = [(path_str, hash_type, mtime, size), ...].
-    Returns {(path_str, hash_type): hash_value}."""
+    Returns {(path_str, hash_type): hash_value}. Uses a temp table + JOIN
+    instead of a dynamic OR-chain so this scales past SQLite's bound-param limit."""
     if not entries:
         return {}
     with _DB_LOCK:
         try:
             conn = _get_conn()
-            condition = " OR ".join("(file_path=? AND hash_type=? AND mtime=? AND size=?)" for _ in entries)
-            rows = conn.execute(
-                f"SELECT file_path, hash_type, hash_value FROM hash_cache WHERE {condition}",
-                tuple(v for e in entries for v in e)
-            ).fetchall()
-            conn.close()
+            conn.execute(""
+                "CREATE TEMP TABLE IF NOT EXISTS _hash_lookup ("
+                "    file_path TEXT, hash_type TEXT, mtime REAL, size INTEGER"
+                ")"
+            "")
+            conn.execute("DELETE FROM _hash_lookup")
+            conn.executemany(
+                "INSERT INTO _hash_lookup (file_path, hash_type, mtime, size) VALUES (?,?,?,?)",
+                entries
+            )
+            rows = conn.execute(""
+                "SELECT h.file_path, h.hash_type, h.hash_value"
+                " FROM hash_cache h"
+                " JOIN _hash_lookup k"
+                "   ON h.file_path = k.file_path"
+                "  AND h.hash_type = k.hash_type"
+                "  AND h.mtime = k.mtime"
+                "  AND h.size = k.size"
+            "").fetchall()
             return {(r[0], r[1]): r[2] for r in rows}
         except Exception:
             return {}
@@ -238,7 +294,6 @@ def put_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int, ha
                 (str(file_path), hash_type, mtime, size, str(hash_value))
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -255,7 +310,6 @@ def put_cached_hashes_batch(entries: list):
                 [(e[0], e[1], e[2], e[3], str(e[4])) for e in entries]
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -269,7 +323,6 @@ def get_trash_origins() -> dict:
         try:
             conn = _get_conn()
             rows = conn.execute("SELECT trash_path, original_source FROM trash_index").fetchall()
-            conn.close()
             return {r[0]: r[1] for r in rows}
         except Exception:
             return {}
@@ -297,7 +350,6 @@ def update_trash_index(run_log: list):
                 entries
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -329,7 +381,6 @@ def rebuild_trash_index_from_logs(folder: Path):
                 [(k, v) for k, v in lookup.items()]
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
     return lookup
@@ -346,7 +397,6 @@ def get_history_manifest() -> list:
             rows = conn.execute(
                 "SELECT log_path, timestamp, count, label, is_undone FROM history_manifest ORDER BY timestamp DESC"
             ).fetchall()
-            conn.close()
             return [{"log_path": r[0], "timestamp": r[1], "count": r[2], "label": r[3], "is_undone": r[4]}
                     for r in rows]
         except Exception:
@@ -362,7 +412,6 @@ def update_history_manifest(log_path: str, timestamp: str, count: int, label: st
                 (log_path, timestamp, count, label)
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -373,7 +422,6 @@ def mark_history_undone(log_path: str):
             conn = _get_conn()
             conn.execute("UPDATE history_manifest SET is_undone=1 WHERE log_path=?", (log_path,))
             conn.commit()
-            conn.close()
         except Exception:
             pass
 
@@ -410,7 +458,6 @@ def rebuild_history_manifest(folder: Path):
                 entries
             )
             conn.commit()
-            conn.close()
         except Exception:
             pass
     return entries

@@ -431,4 +431,9 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    # MUST be the first executable line: without this, PyInstaller-frozen builds
+    # re-execute the app in every ProcessPoolExecutor worker, causing a fork-bomb
+    # or RuntimeError on Windows when "Similar Images" is first triggered.
+    multiprocessing.freeze_support()
     main()

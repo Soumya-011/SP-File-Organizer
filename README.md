@@ -1,4 +1,4 @@
-# 📂 Sp Enterprise File Organizer (v0.8)
+# 📂 Sp Enterprise File Organizer (v1.02)
 
 A high-performance, web-native desktop utility that automatically cleans, sorts, and manages massive file directories. Built with a decoupled Python core and an interactive Chromium-based frontend using **Eel**.
 

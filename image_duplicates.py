@@ -141,6 +141,11 @@ def _lsh_candidate_pairs(items, hash_array, num_bands=LSH_NUM_BANDS,
     in zero shared bands if the differing bits spread across bands unluckily.
     This is the standard acceptable property of LSH used in production
     perceptual-dedup systems — not a bug.
+
+    Known characteristic: within a single bucket, pairwise comparison is
+    O(m^2) where m is the bucket size. This can be noticeable on folders
+    with hundreds of near-identical burst-mode screenshots landing in the
+    same band — expected LSH behavior, not worth pre-optimizing.
     """
     n = len(items)
     buckets = defaultdict(list)
@@ -267,17 +272,11 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
         if store_entries:
             cache_store.put_cached_hashes_batch(store_entries)
 
-    unreadable_from_new = []
-    if not cached_hashes and uncached_images == images:
-        _, unreadable_from_new, _ = (concurrent_hash_all(
-            images, _perceptual_hash, max_workers, use_process_pool=False)
-                                     if not new_hashes else ([], [], False))
-
     # 4. LSH-BASED GROUPING (Fix 5 — replaces O(n^2) exhaustive scan)
     items = list(all_hashes.keys())
     n = len(items)
     if n == 0:
-        return [], unreadable_from_new, False
+        return [], unreadable, False
 
     hash_array = np.array([all_hashes[item] for item in items], dtype=np.uint64)
 
@@ -314,7 +313,7 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     if progress_callback:
         progress_callback(100, f"Found {len(groups)} similar groups ({total_candidate_pairs} candidate pairs checked)", n, n)
 
-    return groups, unreadable_from_new, False
+    return groups, unreadable, False
 
 
 def ask_similarity_threshold() -> int:

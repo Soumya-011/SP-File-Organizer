@@ -882,7 +882,7 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
             groups = get_cached_duplicates()
     else:
         # Similar images: NEVER run the scan synchronously (it blocks the
-        # Eel event loop with ProcessPoolExecutor). If cached, return instantly.
+        # Eel event loop on a background thread). If cached, return instantly.
         # If not cached, return empty with needs_scan=True so the
         # frontend calls start_similar_scan() and waits for the callback.
         cached_threshold = APP_STATE.get("cached_similar_threshold")

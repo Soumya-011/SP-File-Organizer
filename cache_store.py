@@ -75,6 +75,14 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _rollback(conn):
+    """Safely rollback a connection, swallowing any secondary error."""
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+
 def _ensure_tables():
     with _DB_LOCK:
         conn = _get_conn()
@@ -116,7 +124,7 @@ def _ensure_tables():
             """)
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +157,7 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def get_cached_thumbs_batch(entries: list) -> dict:
@@ -181,6 +189,7 @@ def get_cached_thumbs_batch(entries: list) -> dict:
             "").fetchall()
             return {r[0]: r[1] for r in rows}
         except Exception:
+            _rollback(conn)
             return {}
 
 
@@ -197,7 +206,7 @@ def put_cached_thumbs_batch(entries: list):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def prune_stale_thumbs(valid_keys: set):
@@ -232,7 +241,7 @@ def prune_stale_thumbs(valid_keys: set):
                 conn.execute("DELETE FROM thumbnail_cache")
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +291,7 @@ def get_cached_hashes_batch(entries: list) -> dict:
             "").fetchall()
             return {(r[0], r[1]): r[2] for r in rows}
         except Exception:
+            _rollback(conn)
             return {}
 
 
@@ -295,7 +305,7 @@ def put_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int, ha
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def put_cached_hashes_batch(entries: list):
@@ -311,7 +321,7 @@ def put_cached_hashes_batch(entries: list):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +361,7 @@ def update_trash_index(run_log: list):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def rebuild_trash_index_from_logs(folder: Path):
@@ -382,7 +392,7 @@ def rebuild_trash_index_from_logs(folder: Path):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
     return lookup
 
 
@@ -413,7 +423,7 @@ def update_history_manifest(log_path: str, timestamp: str, count: int, label: st
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def mark_history_undone(log_path: str):
@@ -423,7 +433,7 @@ def mark_history_undone(log_path: str):
             conn.execute("UPDATE history_manifest SET is_undone=1 WHERE log_path=?", (log_path,))
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
 
 
 def rebuild_history_manifest(folder: Path):
@@ -459,7 +469,7 @@ def rebuild_history_manifest(folder: Path):
             )
             conn.commit()
         except Exception:
-            pass
+            _rollback(conn)
     return entries
 
 

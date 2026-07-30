@@ -111,7 +111,8 @@ class _DisjointSet:
             self.parent[rx] = ry
 
 
-def find_similar_images(files: list, threshold: int = 10, max_workers: int = None):
+def find_similar_images(files: list, threshold: int = 10, max_workers: int = None,
+                         progress_callback=None):
     """Returns (groups, unreadable, unavailable). `unavailable` is True only
     when Pillow itself isn't installed - distinct from "no images found" or
     "no matches found", both of which are legitimate empty results.
@@ -123,6 +124,10 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
 
     PERFORMANCE (#4): Checks cache_store for previously computed hashes.
     Only uncached images are hashed, then all new hashes are batch-stored.
+
+    Args:
+        progress_callback: optional callable(pct, message, done, total).
+            pct is 0-100. Called during hashing and grouping phases.
     """
     if not PIL_AVAILABLE:
         return [], [], True
@@ -131,6 +136,9 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     images = [f for f in files if is_image_file(f)]
     if not images:
         return [], [], False
+
+    if progress_callback:
+        progress_callback(2, f"Found {len(images)} images to analyze...", 0, len(images))
 
     # 2. Try loading hashes from cache (#4)
     try:
@@ -168,10 +176,29 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     else:
         uncached_images = images[:]
 
+    if progress_callback:
+        cached_count = len(cached_hashes)
+        total_count = len(images)
+        if cached_count > 0:
+            progress_callback(5, f"Loaded {cached_count} cached hashes, {total_count - cached_count} to compute...", 0, total_count - cached_count)
+        else:
+            progress_callback(5, f"Computing perceptual hashes for {len(uncached_images)} images...", 0, len(uncached_images))
+
     # 3. Hash only uncached images concurrently
     new_hashes = {}
     if uncached_images:
-        new_hashes, unreadable = concurrent_hash_all(uncached_images, _perceptual_hash, max_workers)
+        def _hash_progress(done, total):
+            if progress_callback:
+                # Phase 1: hashing (5-75% of total progress)
+                pct = 5 + int(70 * done / total) if total > 0 else 5
+                progress_callback(pct, f"Hashing images... {done}/{total}", done, total)
+
+        new_hashes, unreadable = concurrent_hash_all(
+            uncached_images, _perceptual_hash, max_workers,
+            progress_callback=_hash_progress)
+
+    if progress_callback:
+        progress_callback(78, "Comparing image hashes...", 0, 0)
 
     # Merge cached + new
     all_hashes = {}
@@ -206,6 +233,7 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     visited = np.zeros(n, dtype=bool)
     
     groups = []
+    report_interval = max(1, n // 20)  # report ~20 times during grouping
 
     for i in range(n):
         if visited[i]:
@@ -237,6 +265,14 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
 
         if len(current_group) > 1:
             groups.append(current_group)
+
+        # Progress during grouping (78-95%)
+        if progress_callback and i % report_interval == 0:
+            pct = 78 + int(17 * i / n)
+            progress_callback(pct, f"Grouping similar images... {i}/{n}", i, n)
+
+    if progress_callback:
+        progress_callback(100, f"Found {len(groups)} similar groups", n, n)
 
     return groups, unreadable_from_new, False
 

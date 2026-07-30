@@ -90,7 +90,7 @@ def partial_hash(path: Path, read_size=8192) -> str:
     return h.hexdigest()
 
 
-def concurrent_hash_all(paths: list, hash_fn, max_workers=None):
+def concurrent_hash_all(paths: list, hash_fn, max_workers=None, progress_callback=None):
     """
     Compute hash_fn(path) for every path in `paths`, concurrently.
 
@@ -101,19 +101,26 @@ def concurrent_hash_all(paths: list, hash_fn, max_workers=None):
     For I/O-bound hashing (file_hash, partial_hash), uses ThreadPoolExecutor
     since disk reads release the GIL and threads give real overlap.
 
+    Args:
+        progress_callback: optional callable(done, total) called after each
+        future completes. Runs in the calling thread, safe for Eel calls.
+
     Returns (hashes, unreadable): hashes maps path -> whatever hash_fn
     returned, for every path that could be read; unreadable lists paths
     that raised an exception (OSError, or an image-library decode error).
     """
     hashes = {}
     unreadable = []
+    total = len(paths)
+    done = 0
 
     # Detect PIL-based hashing by function name — perceptual hash is CPU-bound
     fn_name = getattr(hash_fn, '__name__', '')
     is_cpu_bound = fn_name == '_perceptual_hash'
     Executor = ProcessPoolExecutor if is_cpu_bound else ThreadPoolExecutor
 
-    with Executor(max_workers=max_workers) as pool:
+    try:
+        pool = Executor(max_workers=max_workers)
         future_to_path = {pool.submit(hash_fn, p): p for p in paths}
         for future in as_completed(future_to_path):
             p = future_to_path[future]
@@ -121,6 +128,19 @@ def concurrent_hash_all(paths: list, hash_fn, max_workers=None):
                 hashes[p] = future.result()
             except Exception:
                 unreadable.append(p)
+            done += 1
+            if progress_callback and total > 0:
+                try:
+                    progress_callback(done, total)
+                except Exception:
+                    pass
+    finally:
+        # Graceful shutdown even on KeyboardInterrupt
+        try:
+            pool.shutdown(wait=False)
+        except Exception:
+            pass
+
     return hashes, unreadable
 
 

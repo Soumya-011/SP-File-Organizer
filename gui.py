@@ -9,6 +9,7 @@ import sys
 import json
 import base64
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -106,6 +107,10 @@ APP_STATE = {
     # Pagination state for duplicate groups
     "dup_page": 0,
     "dup_page_size": 25,
+
+    # Background similar-image scan state
+    "_similar_scan_running": False,
+    "_similar_scan_thread": None,
 }
 
 def _get_all_folders():
@@ -738,6 +743,113 @@ def trigger_separation_organization(rule_type, timing, limit_value):
         
     return {"status": "success", "moved": len(run_log)}
 
+def _run_similar_scan_background(threshold):
+    """Run similar image scan in a background thread.
+
+    This is the ONLY way similar-image detection is triggered from the GUI.
+    It runs in a daemon thread so the Eel event loop stays responsive.
+    Progress updates are pushed to the frontend via eel._on_similar_scan_progress().
+    When done, it pushes results via eel._on_similar_scan_complete().
+    """
+    import time
+    _last_progress_time = [0.0]  # mutable for closure
+
+    def _progress(pct, message, done, total):
+        # Throttle progress pushes to ~4/second to avoid flooding Eel channel
+        now = time.time()
+        if now - _last_progress_time[0] < 0.25:
+            return
+        _last_progress_time[0] = now
+        try:
+            eel._on_similar_scan_progress({
+                "pct": pct,
+                "message": message,
+                "done": done,
+                "total": total
+            })()
+        except Exception:
+            pass
+
+    try:
+        all_files, _, _ = get_cached_scans()
+        groups, unreadable, unavailable = find_similar_images(
+            all_files, threshold=threshold, progress_callback=_progress)
+
+        APP_STATE["cached_similar"] = groups
+        APP_STATE["cached_similar_unreadable"] = len(unreadable)
+        APP_STATE["cached_similar_unavailable"] = unavailable
+        APP_STATE["cached_similar_threshold"] = threshold
+
+        # Push results to frontend
+        try:
+            eel._on_similar_scan_complete({
+                "total_groups": len(groups),
+                "unreadable_count": len(unreadable),
+                "error": None
+            })()
+        except Exception:
+            pass  # frontend not listening
+
+    except Exception as ex:
+        try:
+            eel._on_similar_scan_complete({
+                "total_groups": 0,
+                "unreadable_count": 0,
+                "error": str(ex)
+            })()
+        except Exception:
+            pass
+    finally:
+        APP_STATE["_similar_scan_running"] = False
+        APP_STATE["_similar_scan_thread"] = None
+
+
+@eel.expose
+def get_similar_scan_status():
+    """Check if a similar image scan is currently running in the background."""
+    return {
+        "scanning": APP_STATE.get("_similar_scan_running", False),
+        "has_cached": APP_STATE.get("cached_similar") is not None,
+        "cached_threshold": APP_STATE.get("cached_similar_threshold")
+    }
+
+
+@eel.expose
+def start_similar_scan(hamming_threshold=10):
+    """Kick off a background similar-image scan if not already running.
+
+    Returns immediately. Results arrive via _on_similar_scan_complete callback.
+    """
+    threshold = int(hamming_threshold)
+
+    # If already cached for this threshold, just signal the frontend
+    if (APP_STATE.get("cached_similar") is not None
+            and APP_STATE.get("cached_similar_threshold") == threshold):
+        return {"status": "cached", "total_groups": len(APP_STATE["cached_similar"])}
+
+    # If a scan is already running, tell the frontend to wait
+    if APP_STATE.get("_similar_scan_running", False):
+        return {"status": "scanning"}
+
+    # Start background scan
+    APP_STATE["_similar_scan_running"] = True
+    t = threading.Thread(target=_run_similar_scan_background, args=(threshold,), daemon=True)
+    APP_STATE["_similar_scan_thread"] = t
+    t.start()
+
+    return {"status": "started"}
+
+
+@eel.expose
+def _on_similar_scan_complete(result):
+    pass  # placeholder; JS side receives the call
+
+
+@eel.expose
+def _on_similar_scan_progress(data):
+    pass  # placeholder; JS side receives the call
+
+
 @eel.expose
 def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, page_size=25):
     """Paginated duplicate groups — loads one page at a time.
@@ -746,26 +858,48 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
     get_thumbnails_for_group() on-demand when a group is expanded or
     scrolled into view. This keeps the initial payload small and
     prevents the Eel main thread from blocking on 500+ PIL opens.
+
+    PERFORMANCE: If duplicate/similar results are already cached in memory,
+    skips the directory scan entirely and returns cached groups instantly.
+    Returns from_cache=True so the frontend can skip the "Scanning..." loader.
     """
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir():
-        return {"total_groups": 0, "displayed_groups": [], "page": 0, "total_pages": 0}
+        return {"total_groups": 0, "displayed_groups": [], "page": 0, "total_pages": 0, "from_cache": False}
 
-    all_files, _, _ = get_cached_scans()
-
+    from_cache = False
+    needs_scan = False
     unreadable_count = 0
     pillow_missing = False
 
     if scan_type == "exact":
-        groups = get_cached_duplicates()
+        # Skip scan if duplicates are already cached
+        if APP_STATE["cached_duplicates"] is not None:
+            groups = APP_STATE["cached_duplicates"]
+            from_cache = True
+        else:
+            all_files, _, _ = get_cached_scans()
+            groups = get_cached_duplicates()
     else:
-        groups, unreadable_count, pillow_missing = get_cached_similar_images(int(hamming_threshold))
-        if pillow_missing:
-            return {
-                "total_groups": 0, "displayed_groups": [],
-                "page": 0, "total_pages": 0,
-                "error": "This feature needs the Pillow library. Install it with: pip install Pillow"
-            }
+        # Similar images: NEVER run the scan synchronously (it blocks the
+        # Eel event loop with ProcessPoolExecutor). If cached, return instantly.
+        # If not cached, return empty with needs_scan=True so the
+        # frontend calls start_similar_scan() and waits for the callback.
+        cached_threshold = APP_STATE.get("cached_similar_threshold")
+        if cached_threshold == int(hamming_threshold) and APP_STATE.get("cached_similar") is not None:
+            groups = APP_STATE["cached_similar"]
+            unreadable_count = APP_STATE.get("cached_similar_unreadable", 0)
+            pillow_missing = APP_STATE.get("cached_similar_unavailable", False)
+            from_cache = True
+            needs_scan = False
+        elif APP_STATE.get("_similar_scan_running", False):
+            # Scan already in progress — return empty, frontend will be notified via callback
+            groups = []
+            needs_scan = False  # don't start another
+        else:
+            # Need to start a background scan — return empty + signal to start
+            groups = []
+            needs_scan = True
 
     total_groups = len(groups)
     total_pages = max(1, (total_groups + page_size - 1) // page_size)
@@ -795,7 +929,9 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
         "total_groups": total_groups,
         "displayed_groups": formatted_groups,
         "page": page, "total_pages": total_pages,
-        "unreadable_count": unreadable_count
+        "unreadable_count": unreadable_count,
+        "from_cache": from_cache,
+        "needs_scan": needs_scan
     }
 
 
@@ -921,14 +1057,16 @@ def get_thumbnails_for_page(group_ids, scan_type="exact"):
 def get_total_duplicate_count(scan_type="exact", hamming_threshold=10):
     """Returns only the total duplicate group count — no group data.
     Used by the overview dashboard to display the count without
-    triggering the expensive duplicate detection pipeline unless needed."""
+    triggering the expensive duplicate detection pipeline unless needed.
+    For similar images, only returns cached count (never triggers a scan)."""
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir():
         return 0
     if scan_type == "exact":
         groups = get_cached_duplicates()
     else:
-        groups, _, _ = get_cached_similar_images(int(hamming_threshold))
+        # Return cached count only — never trigger a scan from the dashboard
+        groups = APP_STATE.get("cached_similar")
     return len(groups) if groups else 0
 
 

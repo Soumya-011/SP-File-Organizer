@@ -62,11 +62,55 @@ window.updateLoaderProgress = function(msg, current, total) {
 // Python calls: eel._on_python_progress(message, current, total)()
 if (typeof eel !== "undefined") {
     eel.expose(_on_python_progress);
+    eel.expose(_on_similar_scan_complete);
+    eel.expose(_on_similar_scan_progress);
 }
 function _on_python_progress(message, current, total) {
     // Only update if loader is visible (operation is in progress)
     if (document.getElementById("global-loader").style.display !== "none") {
         updateLoaderProgress(message, current, total);
+    }
+}
+
+// Called from Python when background similar-image scan completes
+function _on_similar_scan_complete(result) {
+    // Hide the inline progress bar
+    const progressBar = document.getElementById("similar-scan-progress");
+    if (progressBar) progressBar.style.display = "none";
+
+    // Only act if we're still on the similar-images sub-tab
+    const exactTab = document.getElementById("tab-exact");
+    const similarTab = document.getElementById("tab-similar");
+    if (!exactTab || !similarTab || !similarTab.classList.contains("active-tab")) return;
+
+    if (result.error) {
+        const dupContainer = document.getElementById("duplicates-render-container");
+        if (dupContainer) {
+            dupContainer.innerHTML = `<div style="text-align:center; padding:40px; color:#B91C1C; font-size:13px; background:#FEF2F2; border:1px solid #FECACA; border-radius:8px;">Error during scan: ${result.error}</div>`;
+        }
+        return;
+    }
+
+    // Refresh the duplicates view to pick up cached results
+    dupCurrentPage = 0;
+    refreshDashboardTelemetryMetrics();
+}
+
+// Called from Python with progress updates during similar-image scan
+function _on_similar_scan_progress(data) {
+    const progressBar = document.getElementById("similar-scan-progress");
+    const bar = document.getElementById("similar-scan-bar");
+    const msg = document.getElementById("similar-scan-msg");
+    const counter = document.getElementById("similar-scan-counter");
+    if (!progressBar || !bar) return;
+
+    progressBar.style.display = "block";
+    if (data.pct !== undefined) bar.style.width = Math.min(100, data.pct) + "%";
+    if (data.message) msg.innerText = data.message;
+    if (counter && data.done !== undefined && data.total > 0) {
+        counter.innerText = data.done + " / " + data.total;
+    } else if (counter && data.pct !== undefined) {
+        counter.innerText = data.pct + "%";
     }
 }
 
@@ -513,14 +557,40 @@ async function refreshDashboardTelemetryMetrics() {
     const activePanel = document.querySelector(".view-panel.active-view");
     if (activePanel && activePanel.id === "duplicates-panel") {
         
-        if (activeScanType === "similar") {
-            window.showLoader("Analyzing images for visual matches. This may take a moment for large folders...");
-        } else {
-            window.showLoader("Scanning exact duplicates...");
-        }
-
         const thresholdVal = document.getElementById("similarity-select").value;
         const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
+        const isCached = dupResponse.from_cache === true;
+
+        // Handle similar-image background scan
+        if (dupResponse.needs_scan === true && activeScanType === "similar") {
+            // Show the INLINE progress bar (not the blocking full-screen loader)
+            // and kick off the background scan. The UI stays fully interactive.
+            dupCurrentPage = 0;
+            await eel.start_similar_scan(thresholdVal)();
+            // Progress updates arrive via _on_similar_scan_progress,
+            // completion via _on_similar_scan_complete.
+            const dupContainer = document.getElementById("duplicates-render-container");
+            if (dupContainer) dupContainer.innerHTML = "";
+            return;
+        }
+
+        // If a scan is already running in background (switched tabs and came back)
+        if (activeScanType === "similar" && dupResponse.total_groups === 0 && dupResponse.needs_scan !== true) {
+            const scanStatus = await eel.get_similar_scan_status()();
+            if (scanStatus.scanning) {
+                // Ensure the inline progress bar is visible; callbacks will update it
+                const progressEl = document.getElementById("similar-scan-progress");
+                if (progressEl) progressEl.style.display = "block";
+                const dupContainer = document.getElementById("duplicates-render-container");
+                if (dupContainer) dupContainer.innerHTML = "";
+                return;
+            }
+        }
+
+        // Show loader only when actually scanning from scratch (not from cache)
+        if (!isCached && activeScanType === "exact") {
+            window.showLoader("Scanning exact duplicates...");
+        }
         
         const dupGroups = dupResponse.displayed_groups || [];
         window.currentDuplicateGroups = dupGroups;

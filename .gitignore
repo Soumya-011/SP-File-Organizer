@@ -1,0 +1,16 @@
+# Build artifacts from PyInstaller
+build/
+dist/
+*.spec
+
+# Virtual Environments
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# IDEs and OS junk
+.vscode/
+.DS_Store

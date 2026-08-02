@@ -4,6 +4,7 @@ Admin-only endpoints — PIN auth, category management, and bulk rename.
 """
 
 import eel
+import hashlib
 
 from config import load_raw_config, save_raw_config, DEFAULT_CATEGORY_MAP, build_ext_to_category
 from categories import normalize_extensions
@@ -16,7 +17,12 @@ from gui_state import (
 
 @eel.expose
 def verify_admin_pin(pin_attempt):
-    if str(pin_attempt) == str(APP_STATE["admin_pin"]):
+    if not APP_STATE.get("admin_pin"):
+        return {"status": "error", "message": "No PIN configured."}
+        
+    attempt_hash = hashlib.sha256(str(pin_attempt).encode('utf-8')).hexdigest()
+    
+    if attempt_hash == str(APP_STATE["admin_pin"]):
         APP_STATE["admin_mode"] = True
         return {"status": "success"}
     return {"status": "error", "message": "Incorrect PIN"}

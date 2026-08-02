@@ -6,6 +6,7 @@ module instead, since they need intimate knowledge of that feature's data.
 """
 
 import getpass
+import hashlib
 
 
 def select_multiple(items: list, labels: list, header: str = None,
@@ -79,16 +80,21 @@ def confirm_dry_run_then_execute(execute_fn, confirm_msg: str, cancel_msg: str,
 
 
 def verify_admin_access(admin_pin) -> bool:
-    """Prompts for the admin PIN (hidden input) and checks it against config.json's admin_pin."""
+    """
+    Prompts the user for the admin PIN (hidden input) and securely verifies it.
+    """
     if not admin_pin:
-        print("\n  Admin PIN not configured - add \"admin_pin\": \"....\" to config.json to enable admin features.")
+        print("\n  No admin PIN configured in config.json. Action denied.")
         return False
-    entered = getpass.getpass("  Enter admin PIN: ")
-    if entered != str(admin_pin):
-        print("  Incorrect PIN - admin features disabled for this run.")
-        return False
-    print("  Admin access granted.")
-    return True
+
+    attempt = getpass.getpass("  Enter Admin PIN: ").strip()
+    attempt_hash = hashlib.sha256(attempt.encode('utf-8')).hexdigest()
+    
+    if attempt_hash == str(admin_pin):
+        return True
+        
+    print("  Incorrect PIN.")
+    return False
 
 
 def ask_positive_number(prompt: str) -> float:

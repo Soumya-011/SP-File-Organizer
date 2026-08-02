@@ -17,17 +17,30 @@ function _esc(str) {
 }
 
 // Escape for insertion into HTML attribute values (double-quoted).
+// Used in onclick= handlers to prevent attribute injection.
 function _attrEsc(str) {
     return _esc(str).replace(/"/g, "&quot;");
 }
 
+// Escape for insertion into a JS string literal that is INSIDE an HTML attribute.
+// Fixes the Windows backslash path corruption in onclick="triggerUndo('${_jsInlineEsc(path)}')"
+function _jsInlineEsc(str) {
+    if (str === null || str === undefined) return "";
+    return String(str)
+        .replace(/\\/g, "\\\\")  // Escape backslashes for JS engine
+        .replace(/'/g, "\\'")    // Escape single quotes for JS engine
+        .replace(/"/g, "&quot;") // Escape double quotes for HTML parser
+        .replace(/</g, "&lt;")   // HTML safety
+        .replace(/>/g, "&gt;");  // HTML safety
+}
+
 let currentCategoriesMap = [];
 let activeScanType = "exact";
-let currentRenameCategory = null;
+let currentRenameCategory = null; 
 
 // Multi-folder comparison state (unlimited folders)
-let comparisonFolders = [];
-let organizeFolderData = null;
+let comparisonFolders = []; // array of {path, label}
+let organizeFolderData = null; // cached from get_organize_view_data() 
 
 // Global State Caching for Clean Array Pathing & Modal Navigations
 window.currentDuplicateGroups = [];
@@ -44,6 +57,8 @@ let dupTotalGroups = 0;
 // Global Loader Wrappers
 window.showLoader = function(msg = "Processing...") {
     document.getElementById("loader-text").innerText = msg;
+    document.getElementById("loader-progress-bar-wrap").style.display = "none";
+    document.getElementById("loader-counter").style.display = "none";
     document.getElementById("loader-progress-bar").style.width = "0%";
     document.getElementById("global-loader").style.display = "flex";
 };
@@ -56,6 +71,7 @@ window.hideLoader = function() {
 };
 
 window.updateLoaderProgress = function(msg, current, total) {
+    // Update the loader text with real-time progress from Python
     const textEl = document.getElementById("loader-text");
     const barWrap = document.getElementById("loader-progress-bar-wrap");
     const bar = document.getElementById("loader-progress-bar");
@@ -73,22 +89,27 @@ window.updateLoaderProgress = function(msg, current, total) {
     }
 };
 
-// Eel exposes for Python→JS callbacks
+// Eel calls this from Python to push real-time progress
+// Python calls: eel._on_python_progress(message, current, total)()
 if (typeof eel !== "undefined") {
     eel.expose(_on_python_progress);
     eel.expose(_on_similar_scan_complete);
     eel.expose(_on_similar_scan_progress);
 }
 function _on_python_progress(message, current, total) {
+    // Only update if loader is visible (operation is in progress)
     if (document.getElementById("global-loader").style.display !== "none") {
         updateLoaderProgress(message, current, total);
     }
 }
 
+// Called from Python when background similar-image scan completes
 function _on_similar_scan_complete(result) {
+    // Hide the inline progress bar
     const progressBar = document.getElementById("similar-scan-progress");
     if (progressBar) progressBar.style.display = "none";
 
+    // Only act if we're still on the similar-images sub-tab
     const exactTab = document.getElementById("tab-exact");
     const similarTab = document.getElementById("tab-similar");
     if (!exactTab || !similarTab || !similarTab.classList.contains("active-tab")) return;
@@ -96,15 +117,17 @@ function _on_similar_scan_complete(result) {
     if (result.error) {
         const dupContainer = document.getElementById("duplicates-render-container");
         if (dupContainer) {
-            dupContainer.innerHTML = `<div class="banner-error">Error during scan: ${_esc(result.error)}</div>`;
+            dupContainer.innerHTML = `<div style="text-align:center; padding:40px; color:#B91C1C; font-size:13px; background:#FEF2F2; border:1px solid #FECACA; border-radius:8px;">Error during scan: ${_esc(result.error)}</div>`;
         }
         return;
     }
 
+    // Refresh the duplicates view to pick up cached results
     dupCurrentPage = 0;
     refreshDashboardTelemetryMetrics();
 }
 
+// Called from Python with progress updates during similar-image scan
 function _on_similar_scan_progress(data) {
     const progressBar = document.getElementById("similar-scan-progress");
     const bar = document.getElementById("similar-scan-bar");
@@ -136,23 +159,31 @@ window.showToast = function(message, type = "success", duration = 3500) {
     const c = colors[type] || colors.info;
 
     const toast = document.createElement("div");
-    toast.className = "toast";
-    toast.style.backgroundColor = c.bg;
-    toast.style.borderLeft = "4px solid " + c.border;
+    toast.style.cssText = `
+        pointer-events: auto; display:flex; align-items:center; gap:10px;
+        padding:12px 18px; border-radius:10px; font-size:14px; font-weight:500;
+        color:#fff; background:${c.bg}; border-left:4px solid ${c.border};
+        box-shadow:0 8px 24px rgba(0,0,0,0.18); min-width:280px; max-width:440px;
+        transform:translateX(120%); transition:transform 0.35s cubic-bezier(0.22,1,0.36,1), opacity 0.3s;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
     toast.innerHTML = `
-        <span class="toast-icon">${c.icon}</span>
-        <span class="toast-msg">${message}</span>
+        <span style="font-size:16px; font-weight:700; opacity:0.9;">${c.icon}</span>
+        <span style="flex:1; line-height:1.4;">${message}</span>
     `;
 
+    // Auto-close on click
     toast.style.cursor = "pointer";
     toast.onclick = () => dismissToast(toast);
 
     container.appendChild(toast);
 
+    // Slide in
     requestAnimationFrame(() => {
         toast.style.transform = "translateX(0)";
     });
 
+    // Auto dismiss
     const timer = setTimeout(() => dismissToast(toast), duration);
     toast._dismissTimer = timer;
 };
@@ -182,9 +213,11 @@ function initViewPanelNavigation() {
         btn.addEventListener("click", () => {
             document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
             document.querySelectorAll(".view-panel").forEach(p => p.classList.remove("active-view"));
+            
             btn.classList.add("active");
             const target = btn.getAttribute("data-target");
             document.getElementById(target).classList.add("active-view");
+            
             refreshDashboardTelemetryMetrics();
         });
     });
@@ -202,7 +235,7 @@ function initOrganizeSubTabHandlers() {
             tab.classList.add("active-tab");
             tab.style.borderBottom = "2px solid #3B82F6";
             tab.style.fontWeight = "bold";
-
+            
             document.querySelectorAll(".org-sub-panel").forEach(p => p.style.display = "none");
             const targetId = tab.getAttribute("data-sub");
             document.getElementById(targetId).style.display = "block";
@@ -223,122 +256,195 @@ function initDuplicateViewTabHandlers() {
             tab.classList.add("active-tab");
             tab.style.borderBottom = "2px solid #3B82F6";
             tab.style.fontWeight = "bold";
-
+            
             activeScanType = tab.getAttribute("data-scan");
             document.getElementById("similarity-threshold-pane").style.display = (activeScanType === "similar") ? "block" : "none";
             dupCurrentPage = 0;
             refreshDashboardTelemetryMetrics();
         });
     });
+
+    document.getElementById("similarity-select").addEventListener("change", () => {
+        dupCurrentPage = 0;
+        refreshDashboardTelemetryMetrics();
+    });
 }
 
 function initAdminAndRenameHandlers() {
-    const pinBtn = document.getElementById("submit-pin-btn");
-    if (pinBtn) {
-        pinBtn.addEventListener("click", async () => {
-            const val = document.getElementById("admin-pin-input").value;
-            if (!val) return showToast("Please enter the admin PIN.", "warning");
-            const res = await eel.verify_admin_pin(val)();
-            if (res.status === "success") {
-                showToast("Admin access granted.", "success");
-                unlockAdminUI();
-                document.getElementById("pin-auth-section").style.display = "none";
-            } else {
-                showToast(res.message || "Incorrect PIN.", "error");
-            }
-        });
-    }
+    const handleAuth = async (inputId) => {
+        const val = document.getElementById(inputId).value;
+        const res = await eel.verify_admin_pin(val)();
+        if (res.status === "success") {
+            unlockAdminUI();
+        } else {
+            showToast(res.message, "error");
+        }
+    };
 
-    // Rename handlers
-    document.getElementById("rename-category-select").addEventListener("change", (e) => {
-        currentRenameCategory = e.target.value;
-        _clearRenamePreview();
+    document.getElementById("submit-pin-btn").addEventListener("click", () => handleAuth("admin-pin-input"));
+    
+    const catBtn = document.getElementById("cat-submit-pin-btn");
+    if(catBtn) catBtn.addEventListener("click", () => handleAuth("cat-admin-pin-input"));
+
+    document.getElementById("rename-op-select").addEventListener("change", (e) => {
+        const op = e.target.value;
+        const c2 = document.getElementById("rename-arg2-container");
+        const l1 = document.getElementById("rename-arg1-label");
+        c2.style.display = (op === "replace") ? "block" : "none";
+        
+        if (op === "remove") l1.innerText = "Text to remove";
+        if (op === "replace") l1.innerText = "Text to find";
+        if (op === "prefix") l1.innerText = "Text to add as prefix";
+        if (op === "suffix") l1.innerText = "Text to add as suffix";
     });
-    document.getElementById("rename-preview-btn").addEventListener("click", async () => {
-        if (!currentRenameCategory) return showToast("Select a category first.", "warning");
-        const op = document.getElementById("rename-operation-select").value;
+
+    document.getElementById("rename-category-select").addEventListener("change", async (e) => {
+        currentRenameCategory = e.target.value; 
+        document.getElementById("rename-preview-list").innerHTML = "<li>Category loaded. Select parameters and click preview...</li>";
+        document.getElementById("apply-rename-btn").disabled = true;
+    });
+
+    document.getElementById("preview-rename-btn").addEventListener("click", async () => {
+        const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
-        if (!arg1 && op !== "case") return showToast("Enter a value for the operation.", "warning");
-
+        
+        if (!arg1 && op !== "replace") return showToast("Please enter text argument", "warning");
+        if (!currentRenameCategory) return showToast("No category selected", "warning");
+        
         const changed = await eel.preview_rename(currentRenameCategory, op, arg1, arg2)();
-        const previewBody = document.getElementById("rename-preview-body");
-        previewBody.innerHTML = "";
+
+        const list = document.getElementById("rename-preview-list");
+        list.innerHTML = "";
         if (changed.length === 0) {
-            previewBody.innerHTML = '<tr><td colspan="2" class="text-center-cell">No filenames would change.</td></tr>';
+            list.innerHTML = "<li>No files would be changed with these parameters.</li>";
+            document.getElementById("apply-rename-btn").disabled = true;
         } else {
-            changed.forEach(r => {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `<td class="tbl-cell">${_esc(r.old)}</td><td class="tbl-cell">${_esc(r.new)}</td>`;
-                previewBody.appendChild(tr);
+            changed.forEach(item => {
+                list.innerHTML += `<li>${_esc(item.old)} &nbsp;&rarr;&nbsp; <b style="color:var(--text-primary)">${_esc(item.new)}</b></li>`;
             });
+            if (changed.length === 50) {
+                list.innerHTML += `<li style="color: var(--status-alert); margin-top: 8px;">...preview limited to 50 items to optimize performance.</li>`;
+            }
+            document.getElementById("apply-rename-btn").disabled = false;
         }
     });
-    document.getElementById("rename-execute-btn").addEventListener("click", async () => {
-        if (!currentRenameCategory) return showToast("Select a category first.", "warning");
-        const op = document.getElementById("rename-operation-select").value;
+
+    document.getElementById("apply-rename-btn").addEventListener("click", async () => {
+        const op = document.getElementById("rename-op-select").value;
         const arg1 = document.getElementById("rename-arg1").value;
         const arg2 = document.getElementById("rename-arg2").value;
-        if (!arg1 && op !== "case") return showToast("Enter a value for the operation.", "warning");
-        window.showLoader("Renaming files...");
+        
         const count = await eel.execute_rename(currentRenameCategory, op, arg1, arg2)();
-        window.hideLoader();
-        if (count > 0) {
-            showToast(`Renamed ${count} file(s) successfully.`, "success");
-            _clearRenamePreview();
-        } else {
-            showToast("No files were renamed.", "info");
-        }
+        
+        document.getElementById("rename-preview-list").innerHTML = "<li>Select parameters and click preview...</li>";
+        document.getElementById("apply-rename-btn").disabled = true;
+        
+        await populateRenameCategories();
+        await refreshDashboardTelemetryMetrics();
+        showToast(`Successfully renamed ${count} files.`, "success");
     });
 }
 
 function unlockAdminUI() {
-    document.getElementById("rename-auth-section").style.display = "none";
-    document.getElementById("rename-workspace-section").style.display = "block";
-    const catAuthMsg = document.getElementById("categories-auth-msg");
-    if (catAuthMsg) catAuthMsg.style.display = "none";
-    const catAuthSection = document.getElementById("categories-auth-section");
-    if (catAuthSection) catAuthSection.style.display = "none";
-    const catContent = document.getElementById("categories-content-section");
-    if (catContent) catContent.style.display = "block";
+    const catAuth = document.getElementById("categories-auth-section");
+    const catWork = document.getElementById("categories-workspace-section");
+    if(catAuth) catAuth.style.display = "none";
+    if(catWork) catWork.style.display = "block";
+
+    const renAuth = document.getElementById("rename-auth-section");
+    const renWork = document.getElementById("rename-workspace-section");
+    if(renAuth) renAuth.style.display = "none";
+    if(renWork) renWork.style.display = "block";
+    
     populateRenameCategories();
 }
 
 async function populateRenameCategories() {
     const cats = await eel.get_rename_categories()();
     const sel = document.getElementById("rename-category-select");
-    sel.innerHTML = '<option value="">-- Select Category --</option>';
-    cats.forEach(c => {
-        const opt = document.createElement("option");
-        opt.value = c.name;
-        opt.textContent = c.name + " (" + c.count + " files)";
-        sel.appendChild(opt);
+    sel.innerHTML = "";
+    if (cats.length === 0) {
+        sel.innerHTML = "<option>No categories available</option>";
+        currentRenameCategory = null; 
+    } else {
+        cats.forEach((c, idx) => {
+            const opt = document.createElement("option");
+            opt.value = c.name;
+            opt.innerText = `${c.name} (${c.count} files)`;
+            sel.appendChild(opt);
+            if (idx === 0) currentRenameCategory = c.name; 
+        });
+    }
+}
+
+function initCategoryHandlers() {
+    document.getElementById("add-category-btn").addEventListener("click", () => {
+        document.getElementById("cat-modal-title").innerText = "Add New Category";
+        document.getElementById("cat-name-input").value = "";
+        document.getElementById("cat-name-input").readOnly = false;
+        document.getElementById("cat-exts-input").value = "";
+        document.getElementById("category-modal").style.display = "flex";
+    });
+
+    document.getElementById("save-category-btn").addEventListener("click", async () => {
+        const name = document.getElementById("cat-name-input").value.trim();
+        const exts = document.getElementById("cat-exts-input").value.trim();
+        if(!name || !exts) return showToast("Category Name and Extensions are required.", "warning");
+        
+        const res = await eel.update_category(name, exts)();
+        if(res.status === "success") {
+            document.getElementById("category-modal").style.display = "none";
+            await refreshDashboardTelemetryMetrics();
+        } else {
+            showToast(res.message, "error");
+        }
     });
 }
 
-function _clearRenamePreview() {
-    document.getElementById("rename-preview-body").innerHTML = '';
-}
+window.editCategory = function(name, exts) {
+    document.getElementById("cat-modal-title").innerText = "Edit Category";
+    document.getElementById("cat-name-input").value = name;
+    document.getElementById("cat-name-input").readOnly = true; 
+    document.getElementById("cat-exts-input").value = exts;
+    document.getElementById("category-modal").style.display = "flex";
+};
+
+window.deleteCategory = async function(name) {
+    const proceed = await _showSimpleConfirmModal(
+        `Remove custom config overrides for '${name}'?`,
+        "This will restore the default extensions for this category.",
+        "#D97706"
+    );
+    if (proceed) {
+        await eel.remove_category(name)();
+        await refreshDashboardTelemetryMetrics();
+    }
+};
 
 async function initApplicationContextData() {
     if (typeof eel === "undefined") return;
     const metadata = await eel.get_system_metadata()();
     document.getElementById("current-path-display").innerText = metadata.folder || "No working folder selected.";
 
+    // Comparison folder state
     comparisonFolders = (metadata.comparison_folders || []).map(p => ({path: p, label: p.split(/[\\/]/).pop() || p}));
     _renderComparisonBar();
 
     if (!metadata.has_pin) {
         document.getElementById("rename-auth-msg").innerText = "Admin PIN not configured. Add \"admin_pin\" to config.json.";
         document.getElementById("submit-pin-btn").disabled = true;
+        
         const catAuthMsg = document.getElementById("categories-auth-msg");
-        if (catAuthMsg) catAuthMsg.innerText = "Admin PIN not configured. Add \"admin_pin\" to config.json.";
+        if(catAuthMsg) catAuthMsg.innerText = "Admin PIN not configured. Add \"admin_pin\" to config.json.";
         const catSubBtn = document.getElementById("cat-submit-pin-btn");
-        if (catSubBtn) catSubBtn.disabled = true;
+        if(catSubBtn) catSubBtn.disabled = true;
     }
-
-    if (metadata.admin_mode) unlockAdminUI();
-
+    
+    if (metadata.admin_mode) {
+        unlockAdminUI();
+    }
+    
     if (metadata.folder) {
         window.showLoader("Scanning workspace, please wait...");
         await refreshDashboardTelemetryMetrics();
@@ -346,87 +452,61 @@ async function initApplicationContextData() {
     }
 }
 
-function initCategoryHandlers() {
-    const catPinBtn = document.getElementById("cat-submit-pin-btn");
-    if (catPinBtn) {
-        catPinBtn.addEventListener("click", async () => {
-            const val = document.getElementById("cat-admin-pin-input").value;
-            if (!val) return;
-            const res = await eel.verify_admin_pin(val)();
-            if (res.status === "success") {
-                showToast("Admin access granted.", "success");
-                unlockAdminUI();
-            } else {
-                showToast(res.message || "Incorrect PIN.", "error");
-            }
-        });
-    }
-}
-
 async function triggerRuleLivePreviews() {
     if (typeof eel === "undefined") return;
-    const sizeInput = document.getElementById("size-input-value");
-    const ageInput = document.getElementById("age-input-value");
-    if (!sizeInput || !ageInput) return;
-    const sizeVal = sizeInput.value;
-    const ageVal = ageInput.value;
+    const sizeVal = document.getElementById("size-input-value").value;
     const sizeRes = await eel.get_rule_preview_metrics("size", sizeVal)();
-    document.getElementById("size-preview-tally").innerText = sizeRes.count + " files currently match (" + sizeRes.size_str + ")";
+    document.getElementById("size-preview-tally").innerText = `${sizeRes.count} files currently match (${sizeRes.size_str})`;
+
+    const ageVal = document.getElementById("age-input-value").value;
     const ageRes = await eel.get_rule_preview_metrics("age", ageVal)();
-    document.getElementById("age-preview-tally").innerText = ageRes.count + " files currently match (" + ageRes.size_str + ")";
+    document.getElementById("age-preview-tally").innerText = `${ageRes.count} files currently match (${ageRes.size_str})`;
 }
 
-// ---------------------------------------------------------------------------
-// MAIN DASHBOARD REFRESH — now uses get_dashboard_batch() (1 call vs 6+)
-// ---------------------------------------------------------------------------
 async function refreshDashboardTelemetryMetrics() {
     if (typeof eel === "undefined") return;
+    
+    // --- TELEMETRY AND CATEGORY RENDERING ---
+    // Fetch rule preview values to batch them
+    const sizeVal = document.getElementById("size-input-value") ? document.getElementById("size-input-value").value : null;
+    const ageVal = document.getElementById("age-input-value") ? document.getElementById("age-input-value").value : null;
 
-    // --- BATCH TELEMETRY (Phase 2) ---
-    // Single round-trip replaces: execute_storage_telemetry, get_duplicate_count,
-    // get_categories_data, get_mismatched_data, get_organize_view_data,
-    // get_history_and_trash_logs (6 sequential calls → 1).
-    // Optionally includes rule previews if input values are available.
-    const sizeInput = document.getElementById("size-input-value");
-    const ageInput = document.getElementById("age-input-value");
-    const sizeVal = (sizeInput && sizeInput.value) || null;
-    const ageVal = (ageInput && ageInput.value) || null;
+    // Use the batched endpoint to replace the 6 separated calls
+    const batch = await eel.get_dashboard_batch(sizeVal, ageVal)();
+    if (batch.error) return;
 
-    const data = await eel.get_dashboard_batch(sizeVal, ageVal)();
-    if (data.error) return;
+    // 1. Storage Telemetry
+    const data = batch.storage;
+    document.getElementById("count-total-files").innerText = (data.total_files || 0).toLocaleString();
+    document.getElementById("count-trash-items").innerText = (data.trash_count || 0).toLocaleString();
+    document.getElementById("total-storage-tally").innerText = data.total_size_str || "0 B";
 
-    // 1. Storage telemetry metrics
-    const storage = data.storage;
-    document.getElementById("count-total-files").innerText = (storage.total_files || 0).toLocaleString();
-    document.getElementById("count-trash-items").innerText = (storage.trash_count || 0).toLocaleString();
-    document.getElementById("total-storage-tally").innerText = storage.total_size_str || "0 B";
+    // 2. Duplicate count from batch
+    document.getElementById("count-dup-sets").innerText = (batch.duplicate_count || 0).toLocaleString();
 
-    // 2. Duplicate count
-    document.getElementById("count-dup-sets").innerText = (data.duplicate_count || 0).toLocaleString();
-
-    // 3. Donut chart + legend
     const chartRing = document.getElementById("donut-render-target");
     const legendList = document.getElementById("legend-render-target");
-    if (chartRing && legendList && storage.categories && storage.categories.length > 0) {
+    if (chartRing && legendList && data.categories && data.categories.length > 0) {
         legendList.innerHTML = "";
         let cumulativePct = 0;
         let gradients = [];
         const palette = ['#3B82F6', '#7A5AF8', '#12B76A', '#F79009', '#F04438', '#98A2B3'];
 
-        storage.categories.forEach((cat, idx) => {
+        data.categories.forEach((cat, idx) => {
             const nextPct = cumulativePct + cat.percentage;
             const color = palette[idx % palette.length];
-            gradients.push(color + " " + cumulativePct + "% " + nextPct + "%");
+            gradients.push(`${color} ${cumulativePct}% ${nextPct}%`);
+            
             const li = document.createElement("li");
             li.innerHTML = `<span class="dot" style="background:${color}"></span>${_esc(cat.name)}<span class="pct">${cat.percentage}% · ${cat.size_str}</span>`;
             legendList.appendChild(li);
             cumulativePct = nextPct;
         });
-        chartRing.style.background = "conic-gradient(" + gradients.join(',') + ")";
+        chartRing.style.background = `conic-gradient(${gradients.join(',')})`;
     }
 
-    // 4. Categories grid
-    const catData = data.categories;
+    // 3. Categories Data
+    const catData = batch.categories;
     const grid = document.getElementById("categories-grid");
     if (grid) {
         grid.innerHTML = "";
@@ -436,15 +516,19 @@ async function refreshDashboardTelemetryMetrics() {
 
         catData.forEach(c => {
             const card = document.createElement("div");
-            card.className = "ui-card cat-grid-card";
-            let chipsHtml = c.extensions.map(ext => `<span class="ext-tag">${ext}</span>`).join('');
-            let badge = c.is_custom ? '<span class="custom-badge">Custom</span>' : '';
+            card.className = "ui-card";
+            card.style.padding = "16px";
+            card.style.border = "1px solid var(--stroke-color)";
+            
+            let chipsHtml = c.extensions.map(ext => `<span class="tag" style="background:var(--space-bg); border:1px solid var(--stroke-color); border-radius:6px; padding:4px 8px; font-size:12px; display:inline-block; margin:2px;">${ext}</span>`).join('');
+            let badge = c.is_custom ? `<span style="background:#EEF6FF; color:#2563EB; font-size:10px; padding:2px 6px; border-radius:12px; margin-left:8px; vertical-align:middle;">Custom</span>` : '';
+
             card.innerHTML = `
-                <div class="cat-header">
-                    <div class="cat-name">${_esc(c.name)}${badge}</div>
-                    <div class="cat-actions">
-                        <button class="ui-btn secondary" onclick="editCategory('${_attrEsc(c.name)}', '${_attrEsc(c.extensions.join(', '))}')">Edit</button>
-                        ${c.is_custom ? `<button class="ui-btn danger" onclick="deleteCategory('${_attrEsc(c.name)}')">Del</button>` : ''}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <div style="font-weight:600; font-size:14px;">${_esc(c.name)}${badge}</div>
+                    <div style="display:flex; gap:6px;">
+                        <button class="ui-btn secondary" style="padding:4px 8px; font-size:11px;" onclick="editCategory('${_jsInlineEsc(c.name)}', '${_jsInlineEsc(c.extensions.join(', '))}')">Edit</button>
+                        ${c.is_custom ? `<button class="ui-btn danger" style="padding:4px 8px; font-size:11px;" onclick="deleteCategory('${_jsInlineEsc(c.name)}')">Del</button>` : ''}
                     </div>
                 </div>
                 <div>${chipsHtml}</div>
@@ -453,13 +537,13 @@ async function refreshDashboardTelemetryMetrics() {
         });
     }
 
-    // 5. Mismatched files
-    const mismatches = data.mismatches;
+    // 4. Mismatches
+    const mismatches = batch.mismatches;
     const misCard = document.getElementById("mismatch-warning-card");
     if (misCard) {
-        if (mismatches && mismatches.length > 0) {
+        if(mismatches && mismatches.length > 0) {
             misCard.style.display = "block";
-            document.getElementById("mismatch-text").innerText = mismatches.length + " file(s) are sitting inside category folders they don't belong to.";
+            document.getElementById("mismatch-text").innerText = `${mismatches.length} file(s) are sitting inside category folders they don't belong to.`;
             window.currentMismatches = mismatches;
         } else {
             misCard.style.display = "none";
@@ -467,15 +551,18 @@ async function refreshDashboardTelemetryMetrics() {
         }
     }
 
-    // 6. Organize view
-    organizeFolderData = data.organize_view;
+    // 5. Organize View Data
+    const organizeData = batch.organize_view;
+    organizeFolderData = organizeData; // cache for the modal
     const checklistContainer = document.getElementById("organize-checklist-container");
     if (checklistContainer) {
         checklistContainer.innerHTML = "";
         currentCategoriesMap = [];
+        
         document.getElementById("org-select-all").checked = true;
 
-        const catMap = (data.organize_view && data.organize_view.categories) || {};
+        // Build combined category list with total counts across all folders
+        const catMap = organizeData.categories || {};
         const allCats = Object.keys(catMap);
 
         if (allCats.length === 0) {
@@ -485,11 +572,11 @@ async function refreshDashboardTelemetryMetrics() {
                 currentCategoriesMap.push(cat);
                 const totalCount = Object.values(catMap[cat]).reduce((a, b) => a + b, 0);
                 const row = document.createElement("div");
-                row.className = "org-check-row";
+                row.style.margin = "8px 0";
                 row.innerHTML = `
-                    <label class="check-label">
-                        <input type="checkbox" id="cat-checkbox-${index}" class="org-cat-checkbox" checked>
-                        <span>${_esc(cat)} <b style="color:var(--text-secondary); font-weight:500;">(${totalCount} files)</b></span>
+                    <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+                        <input type="checkbox" id="cat-checkbox-${index}" class="org-cat-checkbox" checked style="width:16px; height:16px;">
+                        <span>${cat} <b style="color:var(--text-secondary); font-weight:500;">(${totalCount} files)</b></span>
                     </label>
                 `;
                 checklistContainer.appendChild(row);
@@ -497,37 +584,86 @@ async function refreshDashboardTelemetryMetrics() {
         }
     }
 
-    // 7. Rule previews (from batch — no extra round-trips)
-    if (data.rule_previews) {
-        if (data.rule_previews.size) {
-            const sp = data.rule_previews.size;
-            document.getElementById("size-preview-tally").innerText = sp.count + " files currently match (" + sp.size_str + ")";
+    // 6. Rule Previews
+    if (batch.rule_previews) {
+        if (batch.rule_previews.size) {
+            document.getElementById("size-preview-tally").innerText = `${batch.rule_previews.size.count} files currently match (${batch.rule_previews.size.size_str})`;
         }
-        if (data.rule_previews.age) {
-            const ap = data.rule_previews.age;
-            document.getElementById("age-preview-tally").innerText = ap.count + " files currently match (" + ap.size_str + ")";
+        if (batch.rule_previews.age) {
+            document.getElementById("age-preview-tally").innerText = `${batch.rule_previews.age.count} files currently match (${batch.rule_previews.age.size_str})`;
+        }
+    }
+
+    // 7. History and Trash
+    const historyData = batch.history;
+    window.currentTrashItems = batch.trash;
+
+    const historyBody = document.getElementById("history-table-body");
+    if (historyBody) {
+        historyBody.innerHTML = "";
+        if (historyData.length === 0) {
+            historyBody.innerHTML = '<tr><td colspan="3" style="color:var(--text-secondary); text-align:center; padding:12px;">No historical action logs found.</td></tr>';
+        } else {
+            historyData.forEach(run => {
+                const tr = document.createElement("tr");
+                // CRITICAL FIX: Properly escape Windows backslashes for JS execution in inline onclick handlers!
+                tr.innerHTML = `
+                    <td style="padding:10px;"><b>${_esc(run.label)}</b></td>
+                    <td style="padding:10px;">Moved <b>${run.count}</b> files/folders</td>
+                    <td style="padding:10px;">
+                        <button class="ui-btn secondary" onclick="triggerUndoSequence('${_jsInlineEsc(run.path)}', '${_jsInlineEsc(run.label)}', ${run.count})" style="padding:4px 10px; font-size:11.5px;">Undo Action</button>
+                    </td>`;
+                historyBody.appendChild(tr);
+            });
+        }
+    }
+
+    const trashBody = document.getElementById("trash-table-body");
+    if (trashBody) {
+        trashBody.innerHTML = "";
+        if (batch.trash.length === 0) {
+            trashBody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary); text-align:center; padding:12px;">Recycle bin empty.</td></tr>';
+        } else {
+            batch.trash.forEach((item, idx) => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td style="padding:10px;"><input type="checkbox" class="bin-item-checkbox" data-index="${idx}"></td>
+                    <td style="padding:10px; font-family:monospace; word-break:break-all;">${_esc(item.name)}</td>
+                    <td style="padding:10px;"><b>${item.size}</b></td>
+                    <td style="padding:10px; color:var(--text-secondary); font-size:11.5px;">${_esc(item.batch)}</td>
+                `;
+                trashBody.appendChild(tr);
+            });
         }
     }
 
     // --- DUPLICATES (PAGINATED + LAZY THUMBNAILS) ---
+    // Only load duplicates if the user is actually looking at the Duplicate tab!
     const activePanel = document.querySelector(".view-panel.active-view");
     if (activePanel && activePanel.id === "duplicates-panel") {
-
+        
         const thresholdVal = document.getElementById("similarity-select").value;
         const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
         const isCached = dupResponse.from_cache === true;
 
+        // Handle similar-image background scan
         if (dupResponse.needs_scan === true && activeScanType === "similar") {
+            // Show the INLINE progress bar (not the blocking full-screen loader)
+            // and kick off the background scan. The UI stays fully interactive.
             dupCurrentPage = 0;
             await eel.start_similar_scan(thresholdVal)();
+            // Progress updates arrive via _on_similar_scan_progress,
+            // completion via _on_similar_scan_complete.
             const dupContainer = document.getElementById("duplicates-render-container");
             if (dupContainer) dupContainer.innerHTML = "";
             return;
         }
 
+        // If a scan is already running in background (switched tabs and came back)
         if (activeScanType === "similar" && dupResponse.total_groups === 0 && dupResponse.needs_scan !== true) {
             const scanStatus = await eel.get_similar_scan_status()();
             if (scanStatus.scanning) {
+                // Ensure the inline progress bar is visible; callbacks will update it
                 const progressEl = document.getElementById("similar-scan-progress");
                 if (progressEl) progressEl.style.display = "block";
                 const dupContainer = document.getElementById("duplicates-render-container");
@@ -536,27 +672,29 @@ async function refreshDashboardTelemetryMetrics() {
             }
         }
 
+        // Show loader only when actually scanning from scratch (not from cache)
         if (!isCached && activeScanType === "exact") {
             window.showLoader("Scanning exact duplicates...");
         }
-
+        
         const dupGroups = dupResponse.displayed_groups || [];
         window.currentDuplicateGroups = dupGroups;
         dupTotalGroups = dupResponse.total_groups || 0;
         dupTotalPages = dupResponse.total_pages || 1;
         dupCurrentPage = dupResponse.page || 0;
-
+        
         const dupSelectAllBtn = document.getElementById("dup-select-all");
-        if (dupSelectAllBtn) dupSelectAllBtn.checked = false;
+        if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
 
+        // Pagination bar visibility
         const paginationBar = document.getElementById("dup-pagination-bar");
         if (paginationBar) {
             if (dupTotalPages > 1) {
                 paginationBar.style.display = "flex";
                 const startItem = dupCurrentPage * 25 + 1;
                 const endItem = Math.min((dupCurrentPage + 1) * 25, dupTotalGroups);
-                document.getElementById("dup-page-info").innerText =
-                    "Showing " + startItem + "\u2013" + endItem + " of " + dupTotalGroups.toLocaleString() + " sets";
+                document.getElementById("dup-page-info").innerText = 
+                    `Showing ${startItem}\u2013${endItem} of ${dupTotalGroups.toLocaleString()} sets`;
                 document.getElementById("dup-prev-btn").disabled = (dupCurrentPage <= 0);
                 document.getElementById("dup-next-btn").disabled = (dupCurrentPage >= dupTotalPages - 1);
             } else {
@@ -569,7 +707,11 @@ async function refreshDashboardTelemetryMetrics() {
             dupContainer.innerHTML = "";
 
             if (dupResponse.error) {
-                dupContainer.innerHTML += `<div class="banner-error"><b>Similar-image scan unavailable:</b> ${_esc(dupResponse.error)}</div>`;
+                dupContainer.innerHTML += `
+                    <div style="background: #FEF2F2; color: #B91C1C; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FECACA; font-size: 13px;">
+                        <b>Similar-image scan unavailable:</b> ${dupResponse.error}
+                    </div>
+                `;
                 window.hideLoader();
                 return;
             }
@@ -577,11 +719,19 @@ async function refreshDashboardTelemetryMetrics() {
             if (dupTotalGroups > dupGroups.length) {
                 const showingCount = (dupCurrentPage + 1) * 25;
                 const shown = Math.min(showingCount, dupTotalGroups);
-                dupContainer.innerHTML += `<div class="banner-warning"><b>High Volume:</b> ${dupTotalGroups.toLocaleString()} duplicate sets found. Showing ${shown} of ${dupTotalGroups.toLocaleString()}. Use pagination to browse all sets.</div>`;
+                dupContainer.innerHTML += `
+                    <div style="background: #FFFBEB; color: #B45309; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 13px;">
+                        <b>High Volume:</b> ${dupTotalGroups.toLocaleString()} duplicate sets found. Showing ${shown} of ${dupTotalGroups.toLocaleString()}. Use pagination to browse all sets.
+                    </div>
+                `;
             }
 
             if (dupResponse.unreadable_count > 0) {
-                dupContainer.innerHTML += `<div class="banner-warning banner-sm">Note: ${dupResponse.unreadable_count} image(s) could not be read (corrupt, locked, or an unsupported format like HEIC without the pillow-heif plugin) and were skipped.</div>`;
+                dupContainer.innerHTML += `
+                    <div style="background: #FFFBEB; color: #B45309; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #FDE68A; font-size: 12.5px;">
+                        Note: ${dupResponse.unreadable_count} image(s) could not be read (corrupt, locked, or an unsupported format like HEIC without the pillow-heif plugin) and were skipped.
+                    </div>
+                `;
             }
 
             if (dupGroups.length === 0) {
@@ -589,81 +739,50 @@ async function refreshDashboardTelemetryMetrics() {
             } else {
                 dupGroups.forEach((group, gIdx) => {
                     const groupWrapper = document.createElement("div");
-                    groupWrapper.className = "dup-group-card";
-
+                    groupWrapper.style.padding = "16px";
+                    groupWrapper.style.border = "1px solid var(--stroke-color)";
+                    groupWrapper.style.borderRadius = "8px";
+                    groupWrapper.style.marginBottom = "16px";
+                    groupWrapper.style.backgroundColor = "#fff";
+                    
                     let itemsListHtml = "";
                     group.files.forEach((file, fIdx) => {
                         const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
-
+                        
+                        // Lazy thumbnail: placeholder first, loaded async after render
                         let mediaThumbnailHtml = `
-                            <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" title="Loading...">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                            <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3; cursor:pointer;" title="Loading...">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
                             </div>`;
-
+                            
                         if (file.thumb_b64) {
-                            mediaThumbnailHtml = `<img class="thumb-img" src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" title="Click for full preview" />`;
+                            mediaThumbnailHtml = `<img src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" style="cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;" title="Click for full preview" />`;
                         }
 
                         itemsListHtml += `
-                            <div class="dup-row">
-                                <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked}>
+                            <div class="dup-row" style="display:flex; align-items:center; gap:12px; padding:12px 6px; border-bottom:1px solid var(--stroke-color);">
+                                <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked} style="width:16px; height:16px;">
                                 ${mediaThumbnailHtml}
                                 <div class="dup-info">
-                                    <b>${_esc(file.name)}</b>
-                                    <span>${_esc(file.path)}</span>
+                                    <b style="font-size:13px; display:block; color:var(--text-primary); word-break:break-all;">${_esc(file.name)}</b>
+                                    <span style="font-size:11.5px; color:var(--text-secondary); word-break:break-all;">${_esc(file.path)}</span>
                                 </div>
                             </div>
                         `;
                     });
 
                     groupWrapper.innerHTML = `
-                        <div class="dup-group-label">Set Match Collection — ${group.size_str} copies each</div>
+                        <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Set Match Collection — ${group.size_str} copies each</div>
                         <div style="display:flex; flex-direction:column;">${itemsListHtml}</div>
                     `;
                     dupContainer.appendChild(groupWrapper);
                 });
 
+                // Lazy-load thumbnails for visible groups after DOM render
                 _loadVisibleThumbnails(activeScanType);
             }
         }
         window.hideLoader();
-    }
-
-    // --- HISTORY AND RECOVERY BIN (from batch data) ---
-    window.currentTrashItems = data.trash || [];
-
-    const historyBody = document.getElementById("history-table-body");
-    if (historyBody) {
-        historyBody.innerHTML = "";
-        const history = data.history || [];
-        if (history.length === 0) {
-            historyBody.innerHTML = '<tr><td colspan="3" class="text-center-cell">No historical action logs found.</td></tr>';
-        } else {
-            history.forEach(run => {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `<td class="tbl-cell"><b>${_esc(run.label)}</b></td><td class="tbl-cell">Moved <b>${run.count}</b> files/folders</td><td class="tbl-cell"><button class="ui-btn secondary" onclick="triggerUndoSequence('${_attrEsc(run.path)}', '${_attrEsc(run.label)}', ${run.count})" style="padding:4px 10px; font-size:11.5px;">Undo Action</button></td>`;
-                historyBody.appendChild(tr);
-            });
-        }
-    }
-
-    const trashBody = document.getElementById("trash-table-body");
-    if (trashBody) {
-        trashBody.innerHTML = "";
-        if (window.currentTrashItems.length === 0) {
-            trashBody.innerHTML = '<tr><td colspan="4" class="text-center-cell">Recycle bin empty.</td></tr>';
-        } else {
-            window.currentTrashItems.forEach((item, idx) => {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `
-                    <td class="tbl-cell"><input type="checkbox" class="bin-item-checkbox" data-index="${idx}"></td>
-                    <td class="tbl-cell-mono">${_esc(item.name)}</td>
-                    <td class="tbl-cell"><b>${item.size}</b></td>
-                    <td class="tbl-cell-sm" style="color:var(--text-secondary);">${_esc(item.batch)}</td>
-                `;
-                trashBody.appendChild(tr);
-            });
-        }
     }
 }
 
@@ -685,8 +804,8 @@ function initInteractivityHandlers() {
         targets.forEach((cat) => {
             const count = window.currentMismatches.filter(m => m.correct === cat).length;
             container.innerHTML += `
-                <label class="check-label" style="margin-bottom:8px;">
-                    <input type="checkbox" class="mismatch-cat-checkbox" value="${cat}" checked>
+                <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer; margin-bottom:8px;">
+                    <input type="checkbox" class="mismatch-cat-checkbox" value="${cat}" checked style="width:16px; height:16px;">
                     <span>${cat} <b style="color:var(--text-secondary); font-weight:500;">(${count} files)</b></span>
                 </label>
             `;
@@ -696,7 +815,8 @@ function initInteractivityHandlers() {
 
     document.getElementById("execute-mismatch-btn").addEventListener("click", async () => {
         const selected = Array.from(document.querySelectorAll(".mismatch-cat-checkbox:checked")).map(cb => cb.value);
-        if (selected.length === 0) return showToast("Select at least one category to fix.", "warning");
+        if(selected.length === 0) return showToast("Select at least one category to fix.", "warning");
+
         const count = await eel.fix_mismatched_files(selected)();
         document.getElementById("mismatch-modal").style.display = "none";
         await refreshDashboardTelemetryMetrics();
@@ -706,24 +826,24 @@ function initInteractivityHandlers() {
     document.getElementById("vacuum-btn").addEventListener("click", async () => {
         const emptyFolders = await eel.get_empty_folders_data()();
         if (emptyFolders.length === 0) return showToast("No empty folders found in the workspace.", "info");
-
+        
         const container = document.getElementById("vacuum-checklist");
         container.innerHTML = "";
-        document.getElementById("vacuum-count-label").innerText = emptyFolders.length + " folder(s) found";
+        document.getElementById("vacuum-count-label").innerText = `${emptyFolders.length} folder(s) found`;
         document.getElementById("vacuum-select-all").checked = true;
-
+        
         emptyFolders.forEach((f) => {
             container.innerHTML += `
-                <label class="vacuum-label">
-                    <input type="checkbox" class="vacuum-folder-checkbox" value="${f.path.replace(/\\/g, '\\\\')}" checked>
+                <label style="display:flex; align-items:center; gap:10px; font-size:13px; cursor:pointer; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--stroke-color);">
+                    <input type="checkbox" class="vacuum-folder-checkbox" value="${_attrEsc(f.path)}" checked style="width:16px; height:16px; flex-shrink:0;">
                     <span style="word-break: break-all;">
                         <b style="color:var(--text-primary); display:block; font-size:13px;">${_esc(f.name)}</b>
-                        <span style="color:var(--text-secondary); font-size:11px; font-family:monospace;">${f.rel_path}</span>
+                        <span style="color:var(--text-secondary); font-size:11px; font-family:monospace;">${_esc(f.rel_path)}</span>
                     </span>
                 </label>
             `;
         });
-
+        
         document.getElementById("vacuum-modal").style.display = "flex";
     });
 
@@ -733,13 +853,13 @@ function initInteractivityHandlers() {
 
     document.getElementById("execute-vacuum-btn").addEventListener("click", async () => {
         const selected = Array.from(document.querySelectorAll(".vacuum-folder-checkbox:checked")).map(cb => cb.value);
-        if (selected.length === 0) return showToast("Select at least one empty folder to clean.", "warning");
+        if(selected.length === 0) return showToast("Select at least one empty folder to clean.", "warning");
 
         const permanentDelete = document.getElementById("vacuum-permanent-delete").checked;
 
         if (permanentDelete) {
             const res = await eel.delete_empty_folders_permanently(selected)();
-            if (res.status === "success") {
+            if(res.status === "success") {
                 document.getElementById("vacuum-modal").style.display = "none";
                 await refreshDashboardTelemetryMetrics();
                 let msg = `Permanently deleted ${res.deleted} empty folder(s).`;
@@ -750,7 +870,7 @@ function initInteractivityHandlers() {
             }
         } else {
             const res = await eel.purge_selected_empty_folders(selected)();
-            if (res.status === "success") {
+            if(res.status === "success") {
                 document.getElementById("vacuum-modal").style.display = "none";
                 await refreshDashboardTelemetryMetrics();
                 showToast(`Workspace Vacuum complete! Cleaned up and moved ${res.purged} empty folder(s) to the Recycle Bin safely.`, "success");
@@ -759,17 +879,25 @@ function initInteractivityHandlers() {
             }
         }
 
+        // Reset the permanent delete checkbox after action
         document.getElementById("vacuum-permanent-delete").checked = false;
     });
 
     document.getElementById("change-workspace-btn").addEventListener("click", async () => {
-        const res = await eel.select_folder_native()();
-        if (res.status === "success") {
-            document.getElementById("current-path-display").innerText = res.path;
-            window.showLoader("Scanning new workspace, please wait...");
-            await refreshDashboardTelemetryMetrics();
-            window.hideLoader();
-            if (document.getElementById("rename-workspace-section").style.display === "block") populateRenameCategories();
+        try {
+            const res = await eel.select_folder_native()();
+            if (res.status === "success") {
+                document.getElementById("current-path-display").innerText = res.path;
+                window.showLoader("Scanning new workspace, please wait...");
+                await refreshDashboardTelemetryMetrics();
+                window.hideLoader();
+                if (document.getElementById("rename-workspace-section").style.display === "block") populateRenameCategories();
+            } else if (res.status === "error") {
+                showToast("Folder dialog error: " + (res.message || "Unknown error"), "error");
+            }
+        } catch (e) {
+            showToast("Failed to open folder dialog. Check console for details.", "error");
+            console.error("select_folder_native error:", e);
         }
     });
 
@@ -787,9 +915,12 @@ function initInteractivityHandlers() {
             if (cb && cb.checked) targets.push(name);
         });
         if (targets.length === 0) return showToast("Select at least one category checkbox.", "warning");
+
+        // If comparison folder is active, show destination modal
         if (comparisonFolders.length > 0 && organizeFolderData && organizeFolderData.folders.length > 1) {
             _showOrganizeDestModal(targets);
         } else {
+            // Single folder — organize directly
             _executeDirectOrganize(targets);
         }
     });
@@ -810,14 +941,17 @@ function initInteractivityHandlers() {
     document.getElementById("execute-separate-org-btn").addEventListener("click", async () => {
         if (!organizeFolderData) return;
         const folders = organizeFolderData.folders;
-        const catMap = organizeFolderData.categories;
         const folderCatsMap = {};
 
+        // Query all checked boxes once to avoid CSS querySelector slash/escape bugs
+        const allCheckedBoxes = Array.from(document.querySelectorAll(".sep-cat-cb:checked"));
+
         folders.forEach(f => {
-            const escapedPath = f.path.replace(/'/g, "\\'").replace(/"/g, '&quot;');
             const selected = [];
-            document.querySelectorAll(`.sep-cat-cb[data-folder="${escapedPath}"]:checked`).forEach(cb => {
-                selected.push(cb.value);
+            allCheckedBoxes.forEach(cb => {
+                if (cb.getAttribute("data-folder") === f.path) {
+                    selected.push(cb.value);
+                }
             });
             if (selected.length > 0) folderCatsMap[f.path] = selected;
         });
@@ -846,6 +980,7 @@ function initInteractivityHandlers() {
     document.getElementById("execute-size-organize-btn").addEventListener("click", async () => {
         const val = document.getElementById("size-input-value").value;
         const timing = document.querySelector('input[name="size-timing"]:checked').value;
+        
         window.showLoader("Organizing by size...");
         const res = await eel.trigger_separation_organization("size", timing, val)();
         window.hideLoader();
@@ -860,6 +995,7 @@ function initInteractivityHandlers() {
     document.getElementById("execute-age-organize-btn").addEventListener("click", async () => {
         const val = document.getElementById("age-input-value").value;
         const timing = document.querySelector('input[name="age-timing"]:checked').value;
+        
         window.showLoader("Organizing by age...");
         const res = await eel.trigger_separation_organization("age", timing, val)();
         window.hideLoader();
@@ -875,7 +1011,9 @@ function initInteractivityHandlers() {
         const isChecked = e.target.checked;
         document.querySelectorAll(".dup-file-purge-checkbox").forEach(cb => {
             const fIdx = parseInt(cb.getAttribute("data-fidx"), 10);
-            if (fIdx > 0) cb.checked = isChecked;
+            if(fIdx > 0) {
+                cb.checked = isChecked;
+            }
         });
     });
 
@@ -889,8 +1027,11 @@ function initInteractivityHandlers() {
             }
         });
         if (targets.length === 0) return showToast("No items selected for cleanup.", "warning");
+
+        // Show confirmation via toast-style approach
         const proceed = await _showPurgeConfirmModal(targets.length);
         if (!proceed) return;
+
         const res = await eel.purge_selected_duplicates(targets)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
@@ -900,6 +1041,7 @@ function initInteractivityHandlers() {
         }
     });
 
+    // Re-scan duplicates button
     document.getElementById("dup-rescan-btn").addEventListener("click", async () => {
         await eel.force_refresh_duplicates()();
         dupCurrentPage = 0;
@@ -916,6 +1058,7 @@ function initInteractivityHandlers() {
             }
         });
         if (targets.length === 0) return showToast("Select files using the checkboxes first.", "warning");
+        
         const res = await eel.restore_from_bin(targets)();
         if (res.status === "success") {
             await refreshDashboardTelemetryMetrics();
@@ -925,7 +1068,7 @@ function initInteractivityHandlers() {
         }
     });
 
-    document.getElementById("empty-bin-btn").addEventListener("click", () => {
+    document.getElementById("empty-bin-btn").addEventListener("click", async () => {
         document.getElementById("empty-trash-confirm-modal").style.display = "flex";
     });
 
@@ -941,40 +1084,39 @@ function initInteractivityHandlers() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Image Preview
-// ---------------------------------------------------------------------------
 window.openImagePreview = async function(gIdx, fIdx) {
     window.currentPreviewGidx = gIdx;
     window.currentPreviewFidx = fIdx;
-
+    
     const targetFile = window.currentDuplicateGroups[gIdx].files[fIdx];
     const modal = document.getElementById("image-preview-modal");
     const imgEl = document.getElementById("preview-modal-img");
     const loader = document.getElementById("preview-loading");
     const infoEl = document.getElementById("preview-file-info");
-
+    
     modal.style.display = "flex";
     loader.style.display = "block";
     imgEl.style.display = "none";
     imgEl.src = "";
     infoEl.innerText = "";
-
+    
     const b64Data = await eel.get_full_image_b64(targetFile.path)();
-    if (b64Data) {
+    if(b64Data) {
         loader.style.display = "none";
         imgEl.src = b64Data;
         imgEl.style.display = "block";
-        infoEl.innerText = targetFile.name + "   —   " + targetFile.path;
+        infoEl.innerText = `${targetFile.name}   —   ${targetFile.path}`;
     } else {
         loader.innerText = "Error loading high resolution image data.";
     }
 };
 
 document.addEventListener("keydown", (e) => {
+    // Close image preview on Escape
     const modal = document.getElementById("image-preview-modal");
     if (modal.style.display === "flex") {
         const groupFiles = window.currentDuplicateGroups[window.currentPreviewGidx].files;
+        
         if (e.key === "ArrowRight") {
             let next = (window.currentPreviewFidx + 1) % groupFiles.length;
             window.openImagePreview(window.currentPreviewGidx, next);
@@ -986,18 +1128,35 @@ document.addEventListener("keydown", (e) => {
         }
     }
 
+    // Close organize destination modal on Escape
     const orgModal = document.getElementById("organize-dest-modal");
-    if (orgModal && orgModal.style.display === "flex" && e.key === "Escape") orgModal.style.display = "none";
+    if (orgModal && orgModal.style.display === "flex" && e.key === "Escape") {
+        orgModal.style.display = "none";
+    }
 
+    // Close undo confirm modal on Escape
     const undoModal = document.getElementById("undo-confirm-modal");
     if (undoModal && undoModal.style.display === "flex" && e.key === "Escape") {
         undoModal.style.display = "none";
         _pendingUndoLogPath = null;
     }
 
+    // Close organize preview modal on Escape
     const orgPreviewModal = document.getElementById("organize-preview-modal");
-    if (orgPreviewModal && orgPreviewModal.style.display === "flex" && e.key === "Escape") orgPreviewModal.style.display = "none";
+    if (orgPreviewModal && orgPreviewModal.style.display === "flex" && e.key === "Escape") {
+        orgPreviewModal.style.display = "none";
+    }
 });
+
+// --- Undo Confirmation Modal Logic ---
+let _pendingUndoLogPath = null;
+
+function _shortPath(p, maxLen) {
+    if (p.length <= maxLen) return p;
+    const parts = p.replace(/\\/g, "/").split("/");
+    if (parts.length <= 2) return p;
+    return ".../" + parts.slice(-2).join("/");
+}
 
 // ---------------------------------------------------------------------------
 // Generic Simple Confirm Modal (replaces all confirm() calls)
@@ -1005,70 +1164,96 @@ document.addEventListener("keydown", (e) => {
 function _showSimpleConfirmModal(title, message, accentColor) {
     return new Promise((resolve) => {
         const overlay = document.createElement("div");
-        overlay.className = "modal-overlay";
+        overlay.id = "simple-confirm-overlay";
+        overlay.style.cssText = "position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:99998; align-items:center; justify-content:center; backdrop-filter:blur(2px); display:flex;";
+
         const color = accentColor || "#2563EB";
+
         overlay.innerHTML = `
-            <div class="modal-card modal-card-sm">
-                <div class="modal-header">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                    <h3>${title}</h3>
+            <div style="background:#fff; border-radius:14px; width:400px; max-width:92vw; box-shadow:0 20px 60px rgba(0,0,0,0.25);">
+                <div style="display:flex; align-items:center; gap:10px; padding:20px 24px; border-bottom:1px solid var(--stroke-color);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" style="width:22px; height:22px; flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                    <h3 style="margin:0; font-size:15px; font-weight:700; color:#111827;">${_esc(title)}</h3>
                 </div>
-                <div class="modal-body"><p>${message}</p></div>
-                <div class="modal-footer">
+                <div style="padding:18px 24px;">
+                    <p style="margin:0; font-size:13.5px; color:#6B7280;">${_esc(message)}</p>
+                </div>
+                <div style="padding:14px 24px; border-top:1px solid var(--stroke-color); display:flex; justify-content:flex-end; gap:10px;">
                     <button class="sc-cancel-btn ui-btn secondary">Cancel</button>
                     <button class="sc-confirm-btn ui-btn primary" style="background:${color}; border-color:${color}; color:#fff;">Confirm</button>
                 </div>
             </div>
         `;
+
         document.body.appendChild(overlay);
+
         overlay.querySelector(".sc-cancel-btn").onclick = () => { overlay.remove(); resolve(false); };
         overlay.querySelector(".sc-confirm-btn").onclick = () => { overlay.remove(); resolve(true); };
-        overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) { overlay.remove(); resolve(false); }
+        });
     });
 }
 
 // ---------------------------------------------------------------------------
-// Purge Duplicates Confirmation Modal
+// Purge Duplicates Confirmation Modal (replaces confirm() for duplicate cleanup)
 // ---------------------------------------------------------------------------
 function _showPurgeConfirmModal(count) {
     return new Promise((resolve) => {
+        const modal = document.getElementById("empty-trash-confirm-modal");
+        if (!modal) { resolve(true); return; }
+
+        // Reuse the modal pattern — show inline confirmation
         const overlay = document.createElement("div");
-        overlay.className = "modal-overlay";
+        overlay.id = "purge-confirm-overlay";
+        overlay.style.cssText = "position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:99998; align-items:center; justify-content:center; backdrop-filter:blur(2px); display:flex;";
+
         overlay.innerHTML = `
-            <div class="modal-card">
-                <div class="modal-header">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="#D97706" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    <h3>Purge Duplicate Files</h3>
+            <div style="background:#fff; border-radius:14px; width:420px; max-width:92vw; box-shadow:0 20px 60px rgba(0,0,0,0.25);">
+                <div style="display:flex; align-items:center; gap:10px; padding:20px 24px; border-bottom:1px solid var(--stroke-color);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#D97706" stroke-width="2" style="width:22px; height:22px; flex-shrink:0;"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2h4a2 2 0 0 1 2 2v2"/></svg>
+                    <h3 style="margin:0; font-size:16px; font-weight:700; color:#111827;">Purge Duplicate Files</h3>
                 </div>
-                <div class="modal-body">
-                    <div class="purge-warning-box">Move <b>${count}</b> selected file(s) to the Recycle Bin? You can restore them later from the History tab.</div>
+                <div style="padding:20px 24px;">
+                    <div style="padding:12px 16px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:8px; font-size:13.5px; color:#92400E; margin-bottom:14px;">
+                        Move <b>${count}</b> selected file(s) to the Recycle Bin? You can restore them later from the History tab.
+                    </div>
                 </div>
-                <div class="modal-footer">
+                <div style="padding:14px 24px; border-top:1px solid var(--stroke-color); display:flex; justify-content:flex-end; gap:10px;">
                     <button id="purge-modal-cancel" class="ui-btn secondary">Cancel</button>
                     <button id="purge-modal-confirm" class="ui-btn primary" style="background:#D97706; border-color:#D97706; color:#fff;">Yes, Move to Recycle Bin</button>
                 </div>
             </div>
         `;
+
         document.body.appendChild(overlay);
-        document.getElementById("purge-modal-cancel").onclick = () => { overlay.remove(); resolve(false); };
-        document.getElementById("purge-modal-confirm").onclick = () => { overlay.remove(); resolve(true); };
-        overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+
+        document.getElementById("purge-modal-cancel").onclick = () => {
+            overlay.remove();
+            resolve(false);
+        };
+        document.getElementById("purge-modal-confirm").onclick = () => {
+            overlay.remove();
+            resolve(true);
+        };
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) { overlay.remove(); resolve(false); }
+        });
     });
 }
 
-// ---------------------------------------------------------------------------
-// Undo Confirmation Modal
-// ---------------------------------------------------------------------------
 function _showUndoConfirmModal(logPath, label, fileCount) {
     _pendingUndoLogPath = logPath;
     const modal = document.getElementById("undo-confirm-modal");
     document.getElementById("undo-log-label").innerText = label;
     document.getElementById("undo-file-count").innerText = " \u2014 " + fileCount + " file(s) will be restored";
 
+    // Show loader while fetching details
     const tbody = document.getElementById("undo-preview-tbody");
-    tbody.innerHTML = '<tr><td colspan="3" class="text-center-cell-loading">Loading file details...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#6B7280;">Loading file details...</td></tr>';
     modal.style.display = "flex";
 
+    // Fetch details async
     eel.get_undo_log_details(logPath)().then(res => {
         if (res.status === "success" && res.entries.length > 0) {
             const limit = 100;
@@ -1076,11 +1261,11 @@ function _showUndoConfirmModal(logPath, label, fileCount) {
             tbody.innerHTML = "";
             entries.forEach(e => {
                 const tr = document.createElement("tr");
-                tr.className = "undo-preview-row";
+                tr.style.borderBottom = "1px solid var(--stroke-color)";
                 tr.innerHTML = `
-                    <td class="undo-cell" title="${_esc(e.file_name)}">${_esc(e.file_name)}</td>
-                    <td class="undo-cell-secondary" title="${_esc(e.destination)}">${_shortPath(e.destination, 40)}</td>
-                    <td class="undo-cell-green" title="${_esc(e.source)}">${_shortPath(e.source, 40)}</td>
+                    <td style="padding:6px 12px; font-weight:500; color:#111827; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${_attrEsc(e.file_name)}">${_esc(e.file_name)}</td>
+                    <td style="padding:6px 12px; color:#6B7280; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${_attrEsc(e.destination)}">${_esc(_shortPath(e.destination, 40))}</td>
+                    <td style="padding:6px 12px; color:#059669; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${_attrEsc(e.source)}">${_esc(_shortPath(e.source, 40))}</td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -1091,20 +1276,11 @@ function _showUndoConfirmModal(logPath, label, fileCount) {
                 document.getElementById("undo-preview-too-many").style.display = "none";
             }
         } else {
-            tbody.innerHTML = '<tr><td colspan="3" class="text-center-cell-loading">No file details available.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#6B7280;">No file details available.</td></tr>';
         }
     }).catch(() => {
-        tbody.innerHTML = '<tr><td colspan="3" class="text-center-cell" style="color:#DC2626;">Failed to load file details.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#DC2626;">Failed to load file details.</td></tr>';
     });
-}
-
-let _pendingUndoLogPath = null;
-
-function _shortPath(p, maxLen) {
-    if (p.length <= maxLen) return p;
-    const parts = p.replace(/\\/g, "/").split("/");
-    if (parts.length <= 2) return p;
-    return ".../" + parts.slice(-2).join("/");
 }
 
 // Wire up undo modal buttons
@@ -1132,14 +1308,17 @@ window.triggerUndoSequence = async function(logPathString, label, count) {
 };
 
 // ---------------------------------------------------------------------------
-// Comparison Bar
+// Comparison Bar — Renders folder chips with individual remove buttons
 // ---------------------------------------------------------------------------
 function _renderComparisonBar() {
     const compBar = document.getElementById("comparison-bar");
     const chipsContainer = document.getElementById("comparison-folder-chips");
     if (!compBar || !chipsContainer) return;
 
-    if (comparisonFolders.length === 0) { compBar.style.display = "none"; return; }
+    if (comparisonFolders.length === 0) {
+        compBar.style.display = "none";
+        return;
+    }
 
     compBar.style.display = "block";
     chipsContainer.innerHTML = "";
@@ -1149,12 +1328,13 @@ function _renderComparisonBar() {
         const chip = document.createElement("div");
         chip.className = "comparison-chip";
         chip.innerHTML = `
-            <span title="${f.path}">${shortLabel}</span>
+            <span title="${_attrEsc(f.path)}">${_esc(shortLabel)}</span>
             <button class="comparison-chip-remove" data-idx="${idx}" title="Remove this folder">&times;</button>
         `;
         chipsContainer.appendChild(chip);
     });
 
+    // Attach remove handlers
     chipsContainer.querySelectorAll(".comparison-chip-remove").forEach(btn => {
         btn.addEventListener("click", async () => {
             const idx = parseInt(btn.getAttribute("data-idx"), 10);
@@ -1180,6 +1360,7 @@ function _showOrganizeDestModal(selectedCategories) {
     const separateBody = document.getElementById("org-dest-separate-body");
     const cancelRow = document.getElementById("org-dest-cancel-row");
 
+    // Build folder option buttons
     optionsDiv.innerHTML = "";
     folders.forEach(f => {
         const shortLabel = f.label.length > 40 ? f.label.substring(0, 37) + "..." : f.label;
@@ -1188,7 +1369,7 @@ function _showOrganizeDestModal(selectedCategories) {
         btn.innerHTML = `
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px; height:18px; flex-shrink:0;"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
             <div>
-                <div style="font-weight:600; font-size:13px;">Organize into ${shortLabel}</div>
+                <div style="font-weight:600; font-size:13px;">Organize into ${_esc(shortLabel)}</div>
                 <div style="font-size:11px; color:var(--text-secondary);">All files from all folders merged into this location</div>
             </div>
         `;
@@ -1199,38 +1380,47 @@ function _showOrganizeDestModal(selectedCategories) {
         optionsDiv.appendChild(btn);
     });
 
+    // Build "Separate for each" section
     separateBody.innerHTML = "";
     const catMap = organizeFolderData.categories;
     folders.forEach(f => {
-        const escapedPath = f.path.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        // Safe attribute-escaped path string for Data Attributes
+        const escapedPathForAttr = _attrEsc(f.path);
         const folderBlock = document.createElement("div");
         folderBlock.style.marginBottom = "14px";
         folderBlock.innerHTML = `
-            <div class="org-dest-section-label">${f.label}</div>
+            <div style="font-size:13px; font-weight:600; margin-bottom:8px; color:var(--text-primary);">${_esc(f.label)}</div>
             <div style="display:flex; flex-wrap:wrap; gap:6px;"></div>
         `;
         const catContainer = folderBlock.querySelector("div:last-child");
         Object.keys(catMap).forEach(cat => {
             const count = catMap[cat][f.path] || 0;
             const label = document.createElement("label");
-            label.className = "check-label check-label-sm";
-            label.innerHTML = `<input type="checkbox" class="sep-cat-cb" data-folder="${escapedPath}" value="${cat}" checked> ${cat} (${count})`;
+            label.style.cssText = "display:flex; align-items:center; gap:5px; font-size:12px; cursor:pointer; padding:4px 8px; background:var(--space-bg); border:1px solid var(--stroke-color); border-radius:6px;";
+            label.innerHTML = `<input type="checkbox" class="sep-cat-cb" data-folder="${escapedPathForAttr}" value="${_attrEsc(cat)}" checked style="width:13px; height:13px;"> ${_esc(cat)} (${count})`;
             catContainer.appendChild(label);
         });
         separateBody.appendChild(folderBlock);
     });
 
-    if (folders.length > 1) { separateSection.style.display = "block"; } else { separateSection.style.display = "none"; }
+    // Show separate section + cancel row (hidden if only single folder)
+    if (folders.length > 1) {
+        separateSection.style.display = "block";
+    } else {
+        separateSection.style.display = "none";
+    }
     cancelRow.style.display = "flex";
     cancelRow.style.justifyContent = "flex-end";
     const modalEl = document.getElementById("organize-dest-modal");
-    modalEl.onclick = function(e) { if (e.target === modalEl) modalEl.style.display = "none"; };
+
+    // Close on backdrop click (outside the card)
+    modalEl.onclick = function(e) {
+        if (e.target === modalEl) modalEl.style.display = "none";
+    };
     modalEl.style.display = "flex";
 }
 
-// ---------------------------------------------------------------------------
-// Organize Preview Modal
-// ---------------------------------------------------------------------------
+// --- Organize Preview Modal Logic ---
 let _pendingOrgCategories = null;
 let _pendingOrgDestPath = null;
 
@@ -1242,11 +1432,12 @@ function _showOrganizePreviewModal(selectedCategories, destPath) {
     const summaryEl = document.getElementById("org-preview-summary");
 
     summaryEl.innerText = "Loading preview...";
-    tbody.innerHTML = '<tr><td colspan="4" class="text-center-cell-loading">Scanning files for preview...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#6B7280;">Scanning files for preview...</td></tr>';
     modal.style.display = "flex";
 
     eel.get_organize_preview(selectedCategories)().then(res => {
         if (res.status === "success") {
+            // Build per-category summary
             const catCounts = {};
             res.entries.forEach(e => { catCounts[e.category] = (catCounts[e.category] || 0) + 1; });
             const catParts = Object.entries(catCounts).map(([c, n]) => n + " " + c).join(", ");
@@ -1257,12 +1448,12 @@ function _showOrganizePreviewModal(selectedCategories, destPath) {
             tbody.innerHTML = "";
             entries.forEach(e => {
                 const tr = document.createElement("tr");
-                tr.className = "undo-preview-row";
+                tr.style.borderBottom = "1px solid var(--stroke-color)";
                 tr.innerHTML = `
-                    <td class="undo-cell" title="${_esc(e.file_name)}">${_esc(e.file_name)}</td>
-                    <td class="undo-cell-secondary" title="${_esc(e.source_folder)}">${_shortPath(e.source_folder, 35)}</td>
-                    <td class="tbl-cell-sm"><span class="org-preview-tag">${_esc(e.category)}</span></td>
-                    <td class="tbl-cell-sm" style="text-align:right; color:var(--text-secondary);">${e.file_size}</td>
+                    <td style="padding:6px 12px; font-weight:500; color:#111827; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${_attrEsc(e.file_name)}">${_esc(e.file_name)}</td>
+                    <td style="padding:6px 12px; color:#6B7280; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${_attrEsc(e.source_folder)}">${_esc(_shortPath(e.source_folder, 35))}</td>
+                    <td style="padding:6px 12px;"><span class="tag" style="background:#EFF6FF; color:#2563EB; border:1px solid #BFDBFE; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:600;">${_esc(e.category)}</span></td>
+                    <td style="padding:6px 12px; text-align:right; color:#6B7280; font-size:11.5px;">${_esc(e.file_size)}</td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -1273,10 +1464,10 @@ function _showOrganizePreviewModal(selectedCategories, destPath) {
                 document.getElementById("org-preview-too-many").style.display = "none";
             }
         } else {
-            tbody.innerHTML = '<tr><td colspan="4" class="text-center-cell" style="color:#DC2626;">Failed to load preview.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#DC2626;">Failed to load preview.</td></tr>';
         }
     }).catch(() => {
-        tbody.innerHTML = '<tr><td colspan="4" class="text-center-cell" style="color:#DC2626;">Failed to load preview.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#DC2626;">Failed to load preview.</td></tr>';
     });
 }
 
@@ -1292,6 +1483,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const cats = _pendingOrgCategories;
         const dest = _pendingOrgDestPath;
         orgPreviewModal.style.display = "none";
+        // Execute the actual organize
         window.showLoader("Organizing files...");
         const res = await eel.trigger_bulk_organization(cats, dest)();
         window.hideLoader();
@@ -1307,11 +1499,12 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function _executeDirectOrganize(selectedCategories, destPath) {
+    // Show preview modal instead of executing directly
     _showOrganizePreviewModal(selectedCategories, destPath);
 }
 
 // ---------------------------------------------------------------------------
-// Lazy Thumbnail Loading
+// Lazy Thumbnail Loading — fetches thumbnails one group at a time on demand
 // ---------------------------------------------------------------------------
 window._loadVisibleThumbnails = async function(scanType) {
     const placeholders = document.querySelectorAll(".thumb-placeholder");
@@ -1321,11 +1514,13 @@ window._loadVisibleThumbnails = async function(scanType) {
         if (gid !== null) globalIds.add(parseInt(gid, 10));
     });
 
+    // (#8) Batch thumbnail loading — single API call for all visible groups
     const gidList = Array.from(globalIds);
     if (gidList.length === 0) return;
 
     try {
         const thumbsMap = await eel.get_thumbnails_for_page(gidList, scanType)();
+        // thumbsMap = {group_id: [{name, path, thumb_b64}, ...], ...}
         for (const gid of gidList) {
             const thumbs = thumbsMap[gid];
             if (!thumbs) continue;
@@ -1335,8 +1530,8 @@ window._loadVisibleThumbnails = async function(scanType) {
                 const match = thumbs.find(t => t.path === window.currentDuplicateGroups[gIdx].files[fIdx].path);
                 if (match && match.thumb_b64) {
                     const img = document.createElement("img");
-                    img.className = "thumb-img";
                     img.src = match.thumb_b64;
+                    img.style.cssText = "cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;";
                     img.title = "Click for full preview";
                     img.onclick = () => openImagePreview(gIdx, fIdx);
                     el.replaceWith(img);
@@ -1372,7 +1567,10 @@ document.getElementById("dup-next-btn").addEventListener("click", async () => {
 document.getElementById("dup-jump-btn").addEventListener("click", async () => {
     const input = document.getElementById("dup-jump-input");
     const target = parseInt(input.value, 10);
-    if (isNaN(target) || target < 1 || target > dupTotalPages) { input.value = ""; return; }
+    if (isNaN(target) || target < 1 || target > dupTotalPages) {
+        input.value = "";
+        return;
+    }
     dupCurrentPage = target - 1;
     input.value = "";
     window.showLoader(`Loading page ${dupCurrentPage + 1}...`);
@@ -1381,13 +1579,15 @@ document.getElementById("dup-jump-btn").addEventListener("click", async () => {
 });
 
 document.getElementById("dup-jump-input").addEventListener("keydown", async (e) => {
-    if (e.key === "Enter") document.getElementById("dup-jump-btn").click();
+    if (e.key === "Enter") {
+        document.getElementById("dup-jump-btn").click();
+    }
 });
 
 window._loadDuplicatePage = async function() {
     const thresholdVal = document.getElementById("similarity-select").value;
     const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
-
+    
     const dupGroups = dupResponse.displayed_groups || [];
     window.currentDuplicateGroups = dupGroups;
     dupTotalGroups = dupResponse.total_groups || 0;
@@ -1395,7 +1595,7 @@ window._loadDuplicatePage = async function() {
     dupCurrentPage = dupResponse.page || 0;
 
     const dupSelectAllBtn = document.getElementById("dup-select-all");
-    if (dupSelectAllBtn) dupSelectAllBtn.checked = false;
+    if(dupSelectAllBtn) dupSelectAllBtn.checked = false;
 
     const paginationBar = document.getElementById("dup-pagination-bar");
     if (paginationBar) {
@@ -1403,8 +1603,8 @@ window._loadDuplicatePage = async function() {
             paginationBar.style.display = "flex";
             const startItem = dupCurrentPage * 25 + 1;
             const endItem = Math.min((dupCurrentPage + 1) * 25, dupTotalGroups);
-            document.getElementById("dup-page-info").innerText =
-                "Showing " + startItem + "\u2013" + endItem + " of " + dupTotalGroups.toLocaleString() + " sets";
+            document.getElementById("dup-page-info").innerText = 
+                `Showing ${startItem}\u2013${endItem} of ${dupTotalGroups.toLocaleString()} sets`;
             document.getElementById("dup-prev-btn").disabled = (dupCurrentPage <= 0);
             document.getElementById("dup-next-btn").disabled = (dupCurrentPage >= dupTotalPages - 1);
         } else {
@@ -1423,31 +1623,35 @@ window._loadDuplicatePage = async function() {
 
     dupGroups.forEach((group, gIdx) => {
         const groupWrapper = document.createElement("div");
-        groupWrapper.className = "dup-group-card";
-
+        groupWrapper.style.padding = "16px";
+        groupWrapper.style.border = "1px solid var(--stroke-color)";
+        groupWrapper.style.borderRadius = "8px";
+        groupWrapper.style.marginBottom = "16px";
+        groupWrapper.style.backgroundColor = "#fff";
+        
         let itemsListHtml = "";
         group.files.forEach((file, fIdx) => {
             const autoChecked = (activeScanType === "exact" && fIdx > 0) ? "checked" : "";
             let mediaThumbnailHtml = `
-                <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" title="Loading...">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                <div class="thumb-placeholder" data-gidx="${gIdx}" data-fidx="${fIdx}" data-gid="${group.id}" style="width:38px; height:38px; border-radius:8px; background:#F3F5FA; border:1px solid var(--stroke-color); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#98A2B3; cursor:pointer;" title="Loading...">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
                 </div>`;
             if (file.thumb_b64) {
-                mediaThumbnailHtml = `<img class="thumb-img" src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" title="Click for full preview" />`;
+                mediaThumbnailHtml = `<img src="${file.thumb_b64}" onclick="openImagePreview(${gIdx}, ${fIdx})" style="cursor:pointer; width:38px; height:38px; border-radius:8px; object-fit:cover; border:1px solid var(--stroke-color); flex-shrink:0;" title="Click for full preview" />`;
             }
             itemsListHtml += `
-                <div class="dup-row">
-                    <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked}>
+                <div class="dup-row" style="display:flex; align-items:center; gap:12px; padding:12px 6px; border-bottom:1px solid var(--stroke-color);">
+                    <input type="checkbox" class="dup-file-purge-checkbox" data-gidx="${gIdx}" data-fidx="${fIdx}" ${autoChecked} style="width:16px; height:16px;">
                     ${mediaThumbnailHtml}
                     <div class="dup-info">
-                        <b>${_esc(file.name)}</b>
-                        <span>${_esc(file.path)}</span>
+                        <b style="font-size:13px; display:block; color:var(--text-primary); word-break:break-all;">${_esc(file.name)}</b>
+                        <span style="font-size:11.5px; color:var(--text-secondary); word-break:break-all;">${_esc(file.path)}</span>
                     </div>
                 </div>
             `;
         });
         groupWrapper.innerHTML = `
-            <div class="dup-group-label">Set Match Collection — ${group.size_str} copies each</div>
+            <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Set Match Collection — ${group.size_str} copies each</div>
             <div style="display:flex; flex-direction:column;">${itemsListHtml}</div>
         `;
         dupContainer.appendChild(groupWrapper);

@@ -120,14 +120,14 @@ def resolve_folder(args) -> Path:
 # Menu actions - each re-scans fresh, so nothing here relies on stale data
 # from an earlier action in the same session.
 # ---------------------------------------------------------------------------
-def run_overview(folder: Path, ext_to_category: dict, exclude_patterns: list):
+def run_overview(folder: Path, ext_to_category: dict, exclude_patterns: list, max_scan_workers: int = None):
     print("\n  Scanning folder recursively for the overview (this may take a moment)...")
     all_files, excluded_count, size_cache = recursive_scan(folder, exclude_patterns)
     if not all_files:
         print_overview(folder, {}, {}, {}, excluded_count, [])
         return
     files_by_category, ext_counts, ext_sizes, _ = bucket_files(all_files, ext_to_category, size_cache)
-    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache)
+    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache, max_workers=max_scan_workers)
     print_overview(folder, ext_counts, ext_sizes, files_by_category, excluded_count,
                    duplicate_groups, unreadable_files, size_cache=size_cache)
 
@@ -191,10 +191,10 @@ def run_organize(folder: Path, category_map: dict, ext_to_category: dict,
         save_run_log(folder, run_log)
 
 
-def run_duplicate_cleaner(folder: Path, exclude_patterns: list):
+def run_duplicate_cleaner(folder: Path, exclude_patterns: list, max_scan_workers: int = None):
     print("\n  Scanning folder recursively for duplicates (this may take a moment)...")
     all_files, _, size_cache = recursive_scan(folder, exclude_patterns)
-    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache)
+    duplicate_groups, unreadable_files = find_duplicates(all_files, size_cache=size_cache, max_workers=max_scan_workers)
 
     if not duplicate_groups:
         print("\n  No exact (byte-identical) duplicate files found.")
@@ -214,7 +214,7 @@ def run_duplicate_cleaner(folder: Path, exclude_patterns: list):
 
     threshold = ask_similarity_threshold()
     print("\n  Scanning images for visual similarity (this may take a moment)...")
-    similar_groups, unreadable_images, unavailable = find_similar_images(all_files, threshold=threshold)
+    similar_groups, unreadable_images, unavailable = find_similar_images(all_files, threshold=threshold, max_workers=max_scan_workers)
 
     if unavailable:
         print("\n  This feature needs the Pillow library - install it with: pip install Pillow")
@@ -364,12 +364,12 @@ def main():
     config_path = Path(args.config).expanduser().resolve() if args.config else (SCRIPT_PATH.parent / DEFAULT_CONFIG_NAME)
 
     if args.view_only:
-        category_map, exclude_patterns, admin_pin = load_config(config_path)
+        category_map, exclude_patterns, admin_pin, max_scan_workers = load_config(config_path)
         ext_to_category = build_ext_to_category(category_map)
         folder = resolve_folder(args)
         if not folder:
             return
-        run_overview(folder, ext_to_category, exclude_patterns)
+        run_overview(folder, ext_to_category, exclude_patterns, max_scan_workers)
         print("\n(--view-only: showing the overview only, no changes made.)")
         return
 
@@ -394,7 +394,7 @@ def main():
     print("   FILE MANAGER - organize your folder by type")
     print("=" * 50)
 
-    category_map, exclude_patterns, admin_pin = load_config(config_path)
+    category_map, exclude_patterns, admin_pin, max_scan_workers = load_config(config_path)
     ext_to_category = build_ext_to_category(category_map)
 
     admin_mode = verify_admin_access(admin_pin) if args.admin else False
@@ -407,11 +407,11 @@ def main():
         choice = show_main_menu(admin_mode)
 
         if choice == "1":
-            run_overview(folder, ext_to_category, exclude_patterns)
+            run_overview(folder, ext_to_category, exclude_patterns, max_scan_workers)
         elif choice == "2":
             run_organize(folder, category_map, ext_to_category, exclude_patterns, args.dry_run)
         elif choice == "3":
-            run_duplicate_cleaner(folder, exclude_patterns)
+            run_duplicate_cleaner(folder, exclude_patterns, max_scan_workers)
         elif choice == "4":
             admin_mode = run_rename(folder, ext_to_category, exclude_patterns, admin_pin, admin_mode)
         elif choice == "5":

@@ -4,7 +4,6 @@ Shared application state, thread-safe accessors, cache management,
 path-safety helpers, and the progress bridge used by all GUI endpoint modules.
 """
 
-import os
 import threading
 import time
 from pathlib import Path
@@ -13,22 +12,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 import eel
 
-from utils import format_size, get_file_size_mb, get_file_age_days
-from config import load_config, build_ext_to_category, load_raw_config, DEFAULT_CATEGORY_MAP
+from config import load_config, build_ext_to_category
 from scanner import scan_folder, recursive_scan, bucket_files
 import cache_store
-from storage_analyzer import compute_storage_usage
 from duplicates import find_duplicates
-from image_duplicates import find_similar_images, is_image_file
-from organizer import find_mismatched_files
-from recycle_bin import list_trash_items
+from image_duplicates import find_similar_images
 
 # --- Thread-safe APP_STATE access ---
 # Background threads (similar-image scan, organize) read/write APP_STATE
 # concurrently with the Eel main thread. All shared-state reads/writes must
 # hold this lock to prevent data races (e.g., background scan writing
 # cached_similar while the main thread reads it for pagination).
-_STATE_LOCK = threading.Lock()
+# RLock (not Lock) because get_cached_duplicates() and get_cached_similar_images()
+# both call get_cached_scans() internally — a non-reentrant Lock would deadlock.
+_STATE_LOCK = threading.RLock()
 
 
 def _state_get(key, default=None):
@@ -57,6 +54,7 @@ APP_STATE = {
     "admin_pin": None,
     "admin_mode": False,
     "ext_to_category": {},
+    "max_scan_workers": None,
 
     # ----------------------------------------------------
     # Multi-Folder Comparison (unlimited folders)
@@ -117,7 +115,6 @@ def _push_ui_progress(message: str, current: int = 0, total: int = 0):
 
     Throttled to at most once every 200ms to avoid flooding the Eel channel.
     """
-    global _progress_counter
     # Throttle: only send if >=200ms since last send
     now = time.time()
     if now - _push_ui_progress.__dict__.setdefault('_last_time', 0) < 0.2:
@@ -147,13 +144,18 @@ def clear_cache():
         walk + grouping still causes noticeable lag on large folders.
       - Operations that genuinely change the file population (undo restore,
         trash, purge duplicates) call invalidate_duplicate_cache() explicitly.
+
+    Must hold _STATE_LOCK to prevent racing with get_cached_scans() mid-scan
+    (e.g., background prune thread setting cached_files back to None while
+    the main thread is still writing the five cache keys from its scan).
     """
-    APP_STATE["cached_files"] = None
-    APP_STATE["cached_categories"] = None
-    APP_STATE["cached_loose_categories"] = None
-    APP_STATE["cached_per_folder_loose"] = None
-    APP_STATE["cached_size_cache"] = None
-    # cached_duplicates and cached_similar are intentionally preserved
+    with _STATE_LOCK:
+        APP_STATE["cached_files"] = None
+        APP_STATE["cached_categories"] = None
+        APP_STATE["cached_loose_categories"] = None
+        APP_STATE["cached_per_folder_loose"] = None
+        APP_STATE["cached_size_cache"] = None
+        # cached_duplicates and cached_similar are intentionally preserved
 
 
 def invalidate_duplicate_cache():
@@ -164,11 +166,12 @@ def invalidate_duplicate_cache():
       - Files removed (trashed / purged duplicates)
       - Workspace changed entirely (new folder)
     """
-    APP_STATE["cached_duplicates"] = None
-    APP_STATE["cached_similar"] = None
-    APP_STATE["cached_similar_threshold"] = None
-    APP_STATE["cached_similar_unreadable"] = 0
-    APP_STATE["cached_similar_unavailable"] = False
+    with _STATE_LOCK:
+        APP_STATE["cached_duplicates"] = None
+        APP_STATE["cached_similar"] = None
+        APP_STATE["cached_similar_threshold"] = None
+        APP_STATE["cached_similar_unreadable"] = 0
+        APP_STATE["cached_similar_unavailable"] = False
 
 
 def clear_all_cache():
@@ -193,87 +196,116 @@ def get_cached_scans():
     Merges files from the primary folder AND the comparison folder (if set).
 
     PERFORMANCE (#2): Multi-folder scans run in parallel threads.
+
+    Thread-safety: The entire check-then-act sequence is wrapped in _STATE_LOCK
+    to prevent two threads (e.g., main Eel thread + background similar-scan thread)
+    from both observing cached_files is None, both triggering a full rescan, and
+    interleaving writes across the five cache keys. The scan itself runs while
+    holding the lock — that's intentional, as it's the only way to prevent the
+    duplicate-rescan race. Uses RLock so reentrant callers (get_cached_duplicates,
+    get_cached_similar_images) don't deadlock.
     """
-    if APP_STATE["cached_files"] is None:
-        folders = _get_all_folders()
-        if not folders:
-            return [], {}, {}
+    with _STATE_LOCK:
+        if APP_STATE["cached_files"] is None:
+            folders = _get_all_folders()
+            if not folders:
+                return [], {}, {}
 
-        def _scan_one_folder(folder):
-            r_files, _, r_size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
-            # bucket_files now returns 4 values (added file_to_cat)
-            r_by_cat, _, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
-            l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
-            return r_files, r_size_cache, r_by_cat, l_by_cat, folder
+            def _scan_one_folder(folder):
+                r_files, _, r_size_cache = recursive_scan(folder, APP_STATE["exclude_patterns"])
+                # bucket_files now returns 4 values (added file_to_cat)
+                r_by_cat, _, _, _ = bucket_files(r_files, APP_STATE["ext_to_category"], r_size_cache)
+                l_by_cat, _, _, _ = scan_folder(folder, APP_STATE["ext_to_category"], APP_STATE["exclude_patterns"])
+                return r_files, r_size_cache, r_by_cat, l_by_cat, folder
 
-        # (#2) Parallel folder scanning
-        merged_files = []
-        merged_size_cache = {}
-        merged_by_cat = defaultdict(list)
-        merged_loose = defaultdict(list)
-        per_folder_loose = {}  # per-folder loose breakdown for organize view
+            # (#2) Parallel folder scanning
+            merged_files = []
+            merged_size_cache = {}
+            merged_by_cat = defaultdict(list)
+            merged_loose = defaultdict(list)
+            per_folder_loose = {}  # per-folder loose breakdown for organize view
 
-        if len(folders) > 1:
-            with ThreadPoolExecutor(max_workers=min(len(folders), 4)) as pool:
-                results = list(pool.map(_scan_one_folder, folders))
-        else:
-            results = [_scan_one_folder(f) for f in folders]
+            if len(folders) > 1:
+                with ThreadPoolExecutor(max_workers=min(len(folders), 4)) as pool:
+                    results = list(pool.map(_scan_one_folder, folders))
+            else:
+                results = [_scan_one_folder(f) for f in folders]
 
-        for r_files, r_size_cache, r_by_cat, l_by_cat, folder in results:
-            merged_files.extend(r_files)
-            merged_size_cache.update(r_size_cache)
-            for cat, files in r_by_cat.items():
-                merged_by_cat[cat].extend(files)
-            for cat, files in l_by_cat.items():
-                merged_loose[cat].extend(files)
-            per_folder_loose[str(folder)] = l_by_cat
+            for r_files, r_size_cache, r_by_cat, l_by_cat, folder in results:
+                merged_files.extend(r_files)
+                merged_size_cache.update(r_size_cache)
+                for cat, files in r_by_cat.items():
+                    merged_by_cat[cat].extend(files)
+                for cat, files in l_by_cat.items():
+                    merged_loose[cat].extend(files)
+                per_folder_loose[str(folder)] = l_by_cat
 
-        APP_STATE["cached_files"] = merged_files
-        APP_STATE["cached_categories"] = dict(merged_by_cat)
-        APP_STATE["cached_loose_categories"] = dict(merged_loose)
-        APP_STATE["cached_per_folder_loose"] = per_folder_loose
-        APP_STATE["cached_size_cache"] = merged_size_cache
+            APP_STATE["cached_files"] = merged_files
+            APP_STATE["cached_categories"] = dict(merged_by_cat)
+            APP_STATE["cached_loose_categories"] = dict(merged_loose)
+            APP_STATE["cached_per_folder_loose"] = per_folder_loose
+            APP_STATE["cached_size_cache"] = merged_size_cache
 
-    return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
+        return APP_STATE["cached_files"], APP_STATE["cached_categories"], APP_STATE["cached_loose_categories"]
 
 
 def get_cached_duplicates():
-    """Exact-duplicate groups, computed once per scan and reused until clear_cache()."""
-    if APP_STATE["cached_duplicates"] is None:
-        all_files, _, _ = get_cached_scans()
-        APP_STATE["cached_duplicates"] = find_duplicates(all_files, size_cache=APP_STATE.get("cached_size_cache"))[0] if all_files else []
-    return APP_STATE["cached_duplicates"]
+    """Exact-duplicate groups, computed once per scan and reused until clear_cache().
+
+    Protected by _STATE_LOCK to prevent duplicate computation from concurrent calls.
+    Calls get_cached_scans() internally — safe because _STATE_LOCK is an RLock.
+    """
+    with _STATE_LOCK:
+        if APP_STATE["cached_duplicates"] is None:
+            all_files, _, _ = get_cached_scans()  # reentrant — RLock allows this
+            APP_STATE["cached_duplicates"] = find_duplicates(
+                all_files, 
+                size_cache=APP_STATE.get("cached_size_cache"),
+                max_workers=APP_STATE.get("max_scan_workers")
+            )[0] if all_files else []
+        return APP_STATE["cached_duplicates"]
 
 
 def get_cached_similar_images(threshold: int):
-    """Returns (groups, unreadable_count, unavailable). Cached per-threshold."""
-    key = APP_STATE.get("cached_similar_threshold")
-    if key != threshold or APP_STATE.get("cached_similar") is None:
-        all_files, _, _ = get_cached_scans()
-        groups, unreadable, unavailable = find_similar_images(all_files, threshold=threshold)
-        APP_STATE["cached_similar"] = groups
-        APP_STATE["cached_similar_unreadable"] = len(unreadable)
-        APP_STATE["cached_similar_unavailable"] = unavailable
-        APP_STATE["cached_similar_threshold"] = threshold
-    return (APP_STATE["cached_similar"],
-            APP_STATE.get("cached_similar_unreadable", 0),
-            APP_STATE.get("cached_similar_unavailable", False))
+    """Returns (groups, unreadable_count, unavailable). Cached per-threshold.
+
+    Protected by _STATE_LOCK to prevent duplicate computation from concurrent calls.
+    Calls get_cached_scans() internally — safe because _STATE_LOCK is an RLock.
+    """
+    with _STATE_LOCK:
+        key = APP_STATE.get("cached_similar_threshold")
+        if key != threshold or APP_STATE.get("cached_similar") is None:
+            all_files, _, _ = get_cached_scans()  # reentrant — RLock allows this
+            groups, unreadable, unavailable = find_similar_images(
+                all_files, 
+                threshold=threshold,
+                max_workers=APP_STATE.get("max_scan_workers")
+            )
+            APP_STATE["cached_similar"] = groups
+            APP_STATE["cached_similar_unreadable"] = len(unreadable)
+            APP_STATE["cached_similar_unavailable"] = unavailable
+            APP_STATE["cached_similar_threshold"] = threshold
+        return (APP_STATE["cached_similar"],
+                APP_STATE.get("cached_similar_unreadable", 0),
+                APP_STATE.get("cached_similar_unavailable", False))
 
 
 def _build_valid_thumb_keys():
     """Build the set of (path_str, mtime, size) tuples for all current files.
-    Used as input to prune_stale_thumbs() on startup."""
-    all_files, _, size_cache = get_cached_scans()
+    Used as input to prune_stale_thumbs() on startup.
+
+    Single stat() per file — the previous version called f.stat() twice
+    (once for size_cache miss, once unconditionally for mtime), which is the
+    same bug class as the "triple stat()" fix in image_duplicates.py.
+    """
+    all_files, _, _ = get_cached_scans()
     if not all_files:
         return set()
     valid = set()
     for f in all_files:
         try:
-            if f in size_cache:
-                sz = size_cache[f]
-            else:
-                sz = f.stat().st_size
-            valid.add((str(f), f.stat().st_mtime, sz))
+            st = f.stat()  # single stat() call
+            valid.add((str(f), st.st_mtime, st.st_size))
         except OSError:
             continue
     return valid
@@ -286,14 +318,24 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
         APP_STATE["folder"] = Path(initial_folder)
         # Initialize cache store (#3, #4, #7, #9)
         cache_store.init_cache_db(APP_STATE["folder"])
-        # Prune stale thumbnail entries on startup
-        try:
-            cache_store.prune_stale_thumbs(_build_valid_thumb_keys())
-        except Exception:
-            pass
-    cmap, excludes, pin = load_config(config_path)
+        # Prune stale thumbnail entries in a BACKGROUND thread so a large
+        # workspace doesn't delay the Eel window appearing. Best-effort: if
+        # it fails or is still running when the user starts interacting, that's
+        # fine — worst case the DB grows a bit until the next successful prune.
+        # Safe to call get_cached_scans() from here because the background
+        # thread will acquire _STATE_LOCK like any other caller, and the
+        # RLock prevents deadlocks if the user triggers another scan meanwhile.
+        def _prune_in_background():
+            try:
+                cache_store.prune_stale_thumbs(_build_valid_thumb_keys())
+            except Exception:
+                pass
+        threading.Thread(target=_prune_in_background, daemon=True).start()
+    
+    cmap, excludes, pin, max_scan_workers = load_config(config_path)
     APP_STATE["category_map"] = cmap
     APP_STATE["exclude_patterns"] = excludes
     APP_STATE["admin_pin"] = pin
+    APP_STATE["max_scan_workers"] = max_scan_workers
     APP_STATE["ext_to_category"] = build_ext_to_category(cmap)
     clear_all_cache()

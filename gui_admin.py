@@ -5,9 +5,8 @@ Admin-only endpoints — PIN auth, category management, and bulk rename.
 
 import eel
 
-from config import load_raw_config,build_ext_to_category, save_raw_config, DEFAULT_CATEGORY_MAP
+from config import load_raw_config, save_raw_config, DEFAULT_CATEGORY_MAP, build_ext_to_category
 from categories import normalize_extensions
-from scanner import scan_folder
 from rename import build_rename_plan, execute_rename_plan
 from undo import save_run_log
 from gui_state import (

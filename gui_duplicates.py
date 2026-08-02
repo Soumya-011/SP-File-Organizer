@@ -17,6 +17,7 @@ from gui_state import (
     APP_STATE, _STATE_LOCK, _state_set,
     clear_cache, invalidate_duplicate_cache,
     get_cached_scans, get_cached_duplicates,
+    _filter_safe_paths,
 )
 from gui_thumbnails import _generate_base64_thumb
 import cache_store
@@ -53,7 +54,11 @@ def _run_similar_scan_background(threshold):
     try:
         all_files, _, _ = get_cached_scans()
         groups, unreadable, unavailable = find_similar_images(
-            all_files, threshold=threshold, progress_callback=_progress)
+            all_files, 
+            threshold=threshold, 
+            progress_callback=_progress,
+            max_workers=APP_STATE.get("max_scan_workers")
+        )
 
         _state_set(
             cached_similar=groups,
@@ -193,6 +198,7 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
         "displayed_groups": formatted_groups,
         "page": page, "total_pages": total_pages,
         "unreadable_count": unreadable_count,
+        "pillow_missing": pillow_missing,
         "from_cache": from_cache,
         "needs_scan": needs_scan
     }
@@ -230,7 +236,6 @@ def get_thumbnails_for_page(group_ids, scan_type="exact"):
         return {}
 
     result = {}
-    to_generate = []
     cache_entries = []
     path_to_meta = {}
 

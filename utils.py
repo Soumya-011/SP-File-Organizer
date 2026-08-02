@@ -9,6 +9,7 @@ else builds on.
 
 import fnmatch
 import hashlib
+import os
 import sys
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -125,6 +126,15 @@ def concurrent_hash_all(paths: list, hash_fn, max_workers=None,
     enforced (not the OS-default 'fork') to avoid deadlocks when the
     parent process has multiple threads (e.g. Eel's websocket server).
 
+    CPU throttling: if `max_workers` isn't given, this does NOT hand `None`
+    straight to the executor (which would default to `min(32, cpu_count()+4)`
+    threads — enough to saturate every core on a large scan and make the
+    whole system feel unresponsive). Instead it falls back to
+    `cpu_count() - 1`, leaving at least one core free for the OS/UI.
+    Callers that read "max_scan_workers" from config.json (see config.py's
+    load_config()) should pass that value explicitly here to let the user
+    override this default.
+
     Args:
         use_process_pool: if True, use processes instead of threads.
             PIL's C-level decode/resize releases the GIL, so threads are
@@ -137,10 +147,23 @@ def concurrent_hash_all(paths: list, hash_fn, max_workers=None,
     returned, for every path that could be read; unreadable lists paths
     that raised an exception (OSError, or an image-library decode error).
     """
+    # BUG FIX: hashes/unreadable/total/done used to be initialized ONLY
+    # inside the `if max_workers is None:` branch below, which meant any
+    # caller that explicitly passed a max_workers value (e.g. one read from
+    # config.json's "max_scan_workers") hit UnboundLocalError the moment
+    # this function tried to use them. These four lines must always run,
+    # regardless of whether max_workers was given.
     hashes = {}
     unreadable = []
     total = len(paths)
     done = 0
+
+    if max_workers is None:
+        # Leave at least one core free for the OS/UI so a large scan doesn't
+        # make the whole system feel unresponsive. Callers with an explicit
+        # config.json "max_scan_workers" value should pass it in instead of
+        # relying on this automatic default.
+        max_workers = max(1, (os.cpu_count() or 4) - 1)
 
     if use_process_pool:
         Executor = ProcessPoolExecutor

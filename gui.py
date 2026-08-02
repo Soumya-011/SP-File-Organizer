@@ -33,7 +33,6 @@ import gui_history     # restore_from_bin, empty_trash_completely, etc.
 import gui_admin       # verify_admin_pin, update_category, etc.
 import gui_folders     # select_folder_native, add_comparison_folder, etc.
 
-
 def launch_gui(config_path, initial_folder=None):
     gui_state.initialize_runtime_configs(config_path, initial_folder)
     try:

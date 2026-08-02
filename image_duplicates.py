@@ -241,7 +241,7 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
             progress_callback(5, f"Computing perceptual hashes for {len(uncached_images)} images...", 0, len(uncached_images))
 
     # 3. Hash only uncached images concurrently
-    new_hashes = {},[]
+    new_hashes, unreadable = {}, []
     if uncached_images:
         def _hash_progress(done, total):
             if progress_callback:

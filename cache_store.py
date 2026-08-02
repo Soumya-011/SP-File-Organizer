@@ -26,7 +26,7 @@ from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Database singleton (thread-safe)
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 _DB_PATH = None
 _DB_LOCK = threading.Lock()
 
@@ -40,7 +40,6 @@ _HASH_TTL = 0
 
 
 def _get_db_path() -> Path:
-    global _DB_PATH
     if _DB_PATH is None:
         raise RuntimeError("cache_store not initialized — call init_cache_db() first.")
     return _DB_PATH
@@ -75,8 +74,11 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def _rollback(conn):
-    """Safely rollback a connection, swallowing any secondary error."""
+def _safe_rollback(conn):
+    """Roll back any partially-applied transaction on this connection.
+    Needed because connections are persistent per thread — a failure
+    partway through a multi-statement sequence can otherwise leave an
+    open transaction on a thread's reused connection indefinitely."""
     try:
         conn.rollback()
     except Exception:
@@ -124,15 +126,16 @@ def _ensure_tables():
             """)
             conn.commit()
         except Exception:
-            _rollback(conn)
+            _safe_rollback(conn)
 
 
 # ---------------------------------------------------------------------------
 # Thumbnail cache (#3)
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 def get_cached_thumb(file_path: Path, mtime: float, size: int) -> str:
     """Return cached base64 thumbnail or empty string."""
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             row = conn.execute(
@@ -141,6 +144,8 @@ def get_cached_thumb(file_path: Path, mtime: float, size: int) -> str:
             ).fetchone()
             return row[0] if row else ""
         except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
             return ""
 
 
@@ -149,6 +154,7 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
     if not b64_data:
         return
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute(
@@ -157,7 +163,8 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def get_cached_thumbs_batch(entries: list) -> dict:
@@ -167,13 +174,14 @@ def get_cached_thumbs_batch(entries: list) -> dict:
     if not entries:
         return {}
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute(""
                 "CREATE TEMP TABLE IF NOT EXISTS _thumb_lookup ("
                 "    file_path TEXT, mtime REAL, size INTEGER"
                 ")"
-            "")
+                "")
             conn.execute("DELETE FROM _thumb_lookup")
             conn.executemany(
                 "INSERT INTO _thumb_lookup (file_path, mtime, size) VALUES (?,?,?)",
@@ -189,7 +197,8 @@ def get_cached_thumbs_batch(entries: list) -> dict:
             "").fetchall()
             return {r[0]: r[1] for r in rows}
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
             return {}
 
 
@@ -198,6 +207,7 @@ def put_cached_thumbs_batch(entries: list):
     if not entries:
         return
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.executemany(
@@ -206,7 +216,8 @@ def put_cached_thumbs_batch(entries: list):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def prune_stale_thumbs(valid_keys: set):
@@ -214,6 +225,7 @@ def prune_stale_thumbs(valid_keys: set):
     Uses a temp table + NOT EXISTS subquery instead of a dynamic IN-list
     so this scales past SQLite's SQLITE_MAX_VARIABLE_NUMBER."""
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             if valid_keys:
@@ -222,7 +234,7 @@ def prune_stale_thumbs(valid_keys: set):
                     "CREATE TEMP TABLE IF NOT EXISTS _valid_thumb_keys ("
                     "    file_path TEXT, mtime REAL, size INTEGER"
                     ")"
-                "")
+                    "")
                 conn.execute("DELETE FROM _valid_thumb_keys")
                 conn.executemany(
                     "INSERT INTO _valid_thumb_keys (file_path, mtime, size) VALUES (?,?,?)",
@@ -236,20 +248,22 @@ def prune_stale_thumbs(valid_keys: set):
                     "      AND thumbnail_cache.mtime = v.mtime"
                     "      AND thumbnail_cache.size = v.size"
                     ")"
-                "")
+                    "")
             else:
                 conn.execute("DELETE FROM thumbnail_cache")
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 # ---------------------------------------------------------------------------
 # Hash cache (#4)
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 def get_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int):
     """Return cached hash value or None."""
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             row = conn.execute(
@@ -258,6 +272,8 @@ def get_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int):
             ).fetchone()
             return row[0] if row else None
         except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
             return None
 
 
@@ -268,13 +284,14 @@ def get_cached_hashes_batch(entries: list) -> dict:
     if not entries:
         return {}
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute(""
                 "CREATE TEMP TABLE IF NOT EXISTS _hash_lookup ("
                 "    file_path TEXT, hash_type TEXT, mtime REAL, size INTEGER"
                 ")"
-            "")
+                "")
             conn.execute("DELETE FROM _hash_lookup")
             conn.executemany(
                 "INSERT INTO _hash_lookup (file_path, hash_type, mtime, size) VALUES (?,?,?,?)",
@@ -291,12 +308,14 @@ def get_cached_hashes_batch(entries: list) -> dict:
             "").fetchall()
             return {(r[0], r[1]): r[2] for r in rows}
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
             return {}
 
 
 def put_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int, hash_value):
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute(
@@ -305,7 +324,8 @@ def put_cached_hash(file_path: Path, hash_type: str, mtime: float, size: int, ha
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def put_cached_hashes_batch(entries: list):
@@ -313,6 +333,7 @@ def put_cached_hashes_batch(entries: list):
     if not entries:
         return
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.executemany(
@@ -321,20 +342,24 @@ def put_cached_hashes_batch(entries: list):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 # ---------------------------------------------------------------------------
 # Trash index (#7) — replaces .trash_origin_index.json
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 def get_trash_origins() -> dict:
     """Return {trash_path_str: original_source_str}."""
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             rows = conn.execute("SELECT trash_path, original_source FROM trash_index").fetchall()
             return {r[0]: r[1] for r in rows}
         except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
             return {}
 
 
@@ -342,7 +367,7 @@ def update_trash_index(run_log: list):
     """Incrementally add new trash entries from a run log."""
     if not run_log:
         return
-    from utils import TRASH_DIR_NAME, LOG_DIR_NAME
+    from utils import TRASH_DIR_NAME
     folder = _get_db_path().parent.parent  # log_dir's parent = folder
     trash_root = str(folder / TRASH_DIR_NAME)
     entries = []
@@ -353,6 +378,7 @@ def update_trash_index(run_log: list):
     if not entries:
         return
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.executemany(
@@ -361,7 +387,8 @@ def update_trash_index(run_log: list):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def rebuild_trash_index_from_logs(folder: Path):
@@ -384,6 +411,7 @@ def rebuild_trash_index_from_logs(folder: Path):
             if dest.startswith(trash_root):
                 lookup[dest] = entry.get("source")
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.executemany(
@@ -392,16 +420,18 @@ def rebuild_trash_index_from_logs(folder: Path):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
     return lookup
 
 
 # ---------------------------------------------------------------------------
 # History manifest (#9)
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 def get_history_manifest() -> list:
     """Return cached history entries [{log_path, timestamp, count, label, is_undone}]."""
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             rows = conn.execute(
@@ -410,11 +440,14 @@ def get_history_manifest() -> list:
             return [{"log_path": r[0], "timestamp": r[1], "count": r[2], "label": r[3], "is_undone": r[4]}
                     for r in rows]
         except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
             return []
 
 
 def update_history_manifest(log_path: str, timestamp: str, count: int, label: str):
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute(
@@ -423,17 +456,20 @@ def update_history_manifest(log_path: str, timestamp: str, count: int, label: st
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def mark_history_undone(log_path: str):
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute("UPDATE history_manifest SET is_undone=1 WHERE log_path=?", (log_path,))
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
 
 
 def rebuild_history_manifest(folder: Path):
@@ -460,6 +496,7 @@ def rebuild_history_manifest(folder: Path):
         label = timestamp.strftime("%Y-%m-%d %H:%M:%S") if timestamp else p.stem
         entries.append((str(p), str(timestamp or ""), len(data), label))
     with _DB_LOCK:
+        conn = None
         try:
             conn = _get_conn()
             conn.execute("DELETE FROM history_manifest")
@@ -469,7 +506,8 @@ def rebuild_history_manifest(folder: Path):
             )
             conn.commit()
         except Exception:
-            _rollback(conn)
+            if conn is not None:
+                _safe_rollback(conn)
     return entries
 
 

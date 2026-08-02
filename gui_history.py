@@ -5,11 +5,12 @@ History, undo, and recycle bin endpoints.
 
 import eel
 
-from utils import format_size
+from utils import format_size, LOG_DIR_NAME
 from undo import list_run_logs, restore_run
 from recycle_bin import list_trash_items, restore_item, empty_trash
 from gui_state import (
     APP_STATE, clear_cache, invalidate_duplicate_cache,
+    _is_path_safe,
 )
 from pathlib import Path
 
@@ -52,7 +53,13 @@ def empty_trash_completely():
 @eel.expose
 def get_undo_log_details(log_path_str):
     """Return file-level entries from a specific run log for preview."""
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir():
+        return {"status": "error", "message": "No workspace folder", "entries": []}
     log_path = Path(log_path_str)
+    log_dir = folder / LOG_DIR_NAME
+    if not _is_path_safe(log_path, log_dir):
+        return {"status": "error", "message": "Invalid log path.", "entries": []}
     if not log_path.exists():
         return {"status": "error", "message": "Log file not found.", "entries": []}
     try:
@@ -75,7 +82,15 @@ def get_undo_log_details(log_path_str):
 
 @eel.expose
 def execute_undo_operation(log_path_str):
-    restored, total = restore_run(Path(log_path_str))
+    """Restore files from an undo log, with path-traversal protection."""
+    folder = APP_STATE["folder"]
+    if not folder or not folder.is_dir():
+        return {"status": "error", "message": "No workspace folder", "restored": 0, "total": 0}
+    log_path = Path(log_path_str)
+    log_dir = folder / LOG_DIR_NAME
+    if not _is_path_safe(log_path, log_dir):
+        return {"status": "error", "message": "Invalid log path.", "restored": 0, "total": 0}
+    restored, total = restore_run(log_path)
     clear_cache()
     if restored > 0:
         invalidate_duplicate_cache()

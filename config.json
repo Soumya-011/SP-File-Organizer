@@ -1,9 +1,16 @@
 {
-  "_comment": "Add/override extension categories here, and glob patterns to exclude from scanning. This file, and file_manager.py itself, are always automatically excluded from being moved - no need to list them.",
+  "_comment": "Add/override extension categories here, and glob patterns to exclude from scanning. This file, and file_manager.py itself, are always automatically excluded from being moved - no need to list them. 'max_scan_workers' caps how many files/images are hashed in parallel during duplicate and similar-image scans (leave unset or remove the key to auto-detect based on CPU count).",
   "categories": {
-    "Screenshots": [".png"]
+    "Screenshots": [
+      ".png"
+    ]
   },
-  "exclude": ["*.tmp", "Thumbs.db", "desktop.ini"],
+  "max_scan_workers": 4,
+  "exclude": [
+    "*.tmp",
+    "Thumbs.db",
+    "desktop.ini"
+  ],
   "_admin_pin_comment": "CHANGE THIS before relying on it - it's just a sample. Required to use --admin (bulk rename). This is a lightweight deterrent, not real security.",
   "admin_pin": "admin123"
 }

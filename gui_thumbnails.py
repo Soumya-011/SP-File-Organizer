@@ -19,23 +19,23 @@ import cache_store
 from image_duplicates import is_image_file
 from gui_state import _is_path_safe, _get_all_folders
 
+_THUMB_SIZES = {"dup_row": (60, 60), "gallery": (220, 220)}
 
-def _generate_base64_thumb(file_path: Path, use_cache: bool = True):
-    """Generate base64 thumbnail, with SQLite caching (#3).
 
-    PERFORMANCE (#3): Thumbnails are cached to SQLite keyed by
-    (path, mtime, size), so unchanged images skip PIL encoding.
-    """
+def _generate_base64_thumb(file_path: Path, use_cache: bool = True, variant: str = "dup_row"):
+    """Generate a base64 thumbnail for the given VARIANT (dup_row=60px, gallery=220px),
+    cached to SQLite keyed by (path, mtime, size, variant) so the two sizes never collide."""
     if not PIL_AVAILABLE or not is_image_file(file_path):
         return ""
     if not file_path.exists():
         return ""
 
-    # Check cache (#3)
+    dims = _THUMB_SIZES.get(variant, _THUMB_SIZES["dup_row"])
+
     if use_cache and cache_store._DB_PATH is not None:
         try:
             st = file_path.stat()
-            cached = cache_store.get_cached_thumb(file_path, st.st_mtime, st.st_size)
+            cached = cache_store.get_cached_thumb(file_path, st.st_mtime, st.st_size, variant=variant)
             if cached:
                 return cached
         except OSError:
@@ -46,26 +46,26 @@ def _generate_base64_thumb(file_path: Path, use_cache: bool = True):
     try:
         with Image.open(file_path) as img:
             thumb = img.copy()
-            thumb.thumbnail((60, 60))
+            thumb.thumbnail(dims)
             from io import BytesIO
             buffered = BytesIO()
             if thumb.mode in ("RGBA", "P"):
                 thumb = thumb.convert("RGB")
-            thumb.save(buffered, format="JPEG", quality=75)
+            quality = 75 if variant == "dup_row" else 82
+            thumb.save(buffered, format="JPEG", quality=quality)
             b64 = f"data:image/jpeg;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
 
             # Store to cache (#3)
             if use_cache and cache_store._DB_PATH is not None:
                 try:
                     st = file_path.stat()
-                    cache_store.put_cached_thumb(file_path, st.st_mtime, st.st_size, b64)
+                    cache_store.put_cached_thumb(file_path, st.st_mtime, st.st_size, b64, variant=variant)
                 except Exception:
                     pass
 
             return b64
     except Exception:
         return ""
-
 
 @eel.expose
 def get_full_image_b64(path_str):

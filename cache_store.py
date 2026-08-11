@@ -94,8 +94,9 @@ def _ensure_tables():
                     file_path TEXT NOT NULL,
                     mtime REAL NOT NULL,
                     size INTEGER NOT NULL,
+                    variant TEXT NOT NULL DEFAULT 'dup_row',
                     b64_data TEXT NOT NULL,
-                    PRIMARY KEY (file_path, mtime, size)
+                    PRIMARY KEY (file_path, mtime, size, variant)
                 );
 
                 CREATE TABLE IF NOT EXISTS hash_cache (
@@ -132,15 +133,15 @@ def _ensure_tables():
 # ---------------------------------------------------------------------------
 # Thumbnail cache (#3)
 #---------------------------------------------------------------------------
-def get_cached_thumb(file_path: Path, mtime: float, size: int) -> str:
-    """Return cached base64 thumbnail or empty string."""
+def get_cached_thumb(file_path: Path, mtime: float, size: int, variant: str = "dup_row") -> str:
+    """Return cached base64 thumbnail for the given size VARIANT, or empty string."""
     with _DB_LOCK:
         conn = None
         try:
             conn = _get_conn()
             row = conn.execute(
-                "SELECT b64_data FROM thumbnail_cache WHERE file_path=? AND mtime=? AND size=?",
-                (str(file_path), mtime, size)
+                "SELECT b64_data FROM thumbnail_cache WHERE file_path=? AND mtime=? AND size=? AND variant=?",
+                (str(file_path), mtime, size, variant)
             ).fetchone()
             return row[0] if row else ""
         except Exception:
@@ -149,8 +150,7 @@ def get_cached_thumb(file_path: Path, mtime: float, size: int) -> str:
             return ""
 
 
-def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
-    """Store a base64 thumbnail in the cache."""
+def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str, variant: str = "dup_row"):
     if not b64_data:
         return
     with _DB_LOCK:
@@ -158,8 +158,8 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
         try:
             conn = _get_conn()
             conn.execute(
-                "INSERT OR REPLACE INTO thumbnail_cache (file_path, mtime, size, b64_data) VALUES (?,?,?,?)",
-                (str(file_path), mtime, size, b64_data)
+                "INSERT OR REPLACE INTO thumbnail_cache (file_path, mtime, size, variant, b64_data) VALUES (?,?,?,?,?)",
+                (str(file_path), mtime, size, variant, b64_data)
             )
             conn.commit()
         except Exception:
@@ -167,10 +167,10 @@ def put_cached_thumb(file_path: Path, mtime: float, size: int, b64_data: str):
                 _safe_rollback(conn)
 
 
-def get_cached_thumbs_batch(entries: list) -> dict:
-    """Batch-fetch thumbnails. entries = [(path_str, mtime, size), ...].
-    Returns {path_str: b64_data}. Uses a temp table + JOIN instead of a
-    dynamic OR-chain so this scales past SQLite's SQLITE_MAX_VARIABLE_NUMBER."""
+def get_cached_thumbs_batch(entries: list, variant: str = "dup_row") -> dict:
+    """entries = [(path_str, mtime, size), ...]. Returns {path_str: b64_data} for
+    the given VARIANT only — a 'gallery' batch call never returns 'dup_row' hits
+    or vice versa, so the two features can never poison each other's cache."""
     if not entries:
         return {}
     with _DB_LOCK:
@@ -194,7 +194,8 @@ def get_cached_thumbs_batch(entries: list) -> dict:
                 "   ON t.file_path = k.file_path"
                 "  AND t.mtime = k.mtime"
                 "  AND t.size = k.size"
-            "").fetchall()
+                " WHERE t.variant = ?"
+            "", (variant,)).fetchall()
             return {r[0]: r[1] for r in rows}
         except Exception:
             if conn is not None:
@@ -202,8 +203,7 @@ def get_cached_thumbs_batch(entries: list) -> dict:
             return {}
 
 
-def put_cached_thumbs_batch(entries: list):
-    """Batch-store thumbnails. entries = [(path_str, mtime, size, b64_data), ...]."""
+def put_cached_thumbs_batch(entries: list, variant: str = "dup_row"):
     if not entries:
         return
     with _DB_LOCK:
@@ -211,8 +211,8 @@ def put_cached_thumbs_batch(entries: list):
         try:
             conn = _get_conn()
             conn.executemany(
-                "INSERT OR REPLACE INTO thumbnail_cache (file_path, mtime, size, b64_data) VALUES (?,?,?,?)",
-                entries
+                "INSERT OR REPLACE INTO thumbnail_cache (file_path, mtime, size, variant, b64_data) VALUES (?,?,?,?,?)",
+                [(p, m, s, variant, b) for p, m, s, b in entries]
             )
             conn.commit()
         except Exception:

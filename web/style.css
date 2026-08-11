@@ -794,3 +794,70 @@ body {
     color: #92400E;
     margin-bottom: 14px;
 }
+/* ---------------------------------------------------------------
+   Gallery
+   --------------------------------------------------------------- */
+.gallery-folder-chip-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.gallery-folder-chip {
+    background: var(--space-bg);
+    border: 1px solid var(--stroke-color);
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.gallery-folder-chip:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+.gallery-folder-chip.active { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+
+.gallery-filter-banner {
+    display:flex; align-items:center; justify-content:space-between;
+    background:#EFF6FF; border:1px solid #BFDBFE; color:#1E40AF;
+    padding:10px 16px; border-radius:8px; margin-bottom:14px; font-size:13px; font-weight:500;
+}
+
+.gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 14px;
+}
+
+.gallery-tile {
+    position: relative;
+    aspect-ratio: 1 / 1;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--stroke-color);
+    background: #F3F5FA;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.gallery-tile:hover {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+    z-index: 1;
+}
+.gallery-tile-inner { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#98A2B3; }
+.gallery-tile-icon { width:28px; height:28px; }
+.gallery-tile-img { width:100%; height:100%; object-fit:cover; display:block; }
+.gallery-tile-name {
+    position:absolute; left:0; right:0; bottom:0;
+    background: linear-gradient(0deg, rgba(0,0,0,0.65), transparent);
+    color:#fff; font-size:11px; padding:16px 8px 6px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    pointer-events:none;
+}
+.gallery-badge {
+    position:absolute; top:6px; right:6px;
+    width:22px; height:22px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    color:#fff; font-size:11px; font-weight:700;
+    box-shadow:0 1px 4px rgba(0,0,0,0.35);
+    cursor:pointer;
+}
+.gallery-pagination-bar {
+    display:flex; justify-content:space-between; align-items:center;
+    margin-top:16px; padding-top:14px; border-top:1px solid var(--stroke-color);
+}

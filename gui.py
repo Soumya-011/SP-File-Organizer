@@ -29,6 +29,7 @@ import gui_thumbnails  # get_full_image_b64
 import gui_dashboard   # get_dashboard_batch, get_system_metadata, etc.
 import gui_organize    # trigger_bulk_organization, etc.
 import gui_duplicates  # get_duplicate_groups_data, start_similar_scan, etc.
+import gui_gallery     # get_gallery_folders, get_gallery_page, similarity map
 import gui_history     # restore_from_bin, empty_trash_completely, etc.
 import gui_admin       # verify_admin_pin, update_category, etc.
 import gui_folders     # select_folder_native, add_comparison_folder, etc.

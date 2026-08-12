@@ -861,3 +861,10 @@ body {
     display:flex; justify-content:space-between; align-items:center;
     margin-top:16px; padding-top:14px; border-top:1px solid var(--stroke-color);
 }
+
+/* "Show Only Similar" toggle — active (pressed) state */
+#gallery-only-similar-btn.active {
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    color: #fff;
+}

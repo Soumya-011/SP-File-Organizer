@@ -608,42 +608,43 @@ async function refreshDashboardTelemetryMetrics() {
     // Only load duplicates if the user is actually looking at the Duplicate tab!
     const activePanel = document.querySelector(".view-panel.active-view");
     if (activePanel && activePanel.id === "duplicates-panel") {
-        
+
         const thresholdVal = 10; // similar-image scanning moved to Gallery; Duplicates is exact-only now
+
+        // FIX (#10): loader must be shown BEFORE the blocking scan call, not after —
+        // showing it after the await had already resolved meant it never displayed
+        // real progress, since the scan was already finished by the time it appeared.
+        // find_duplicates() now pushes live progress via _on_python_progress while
+        // this call is in flight, updating this same bar. If the result turns out to
+        // be cached, the call returns almost instantly and hideLoader() below clears it.
+        window.showLoader("Checking for duplicates...");
+
         const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
         const isCached = dupResponse.from_cache === true;
 
-        // Handle similar-image background scan
+        // Handle similar-image background scan (dead path now that Duplicates is
+        // exact-only, kept for safety in case activeScanType is ever repurposed)
         if (dupResponse.needs_scan === true && activeScanType === "similar") {
-            // Show the INLINE progress bar (not the blocking full-screen loader)
-            // and kick off the background scan. The UI stays fully interactive.
             dupCurrentPage = 0;
             await eel.start_similar_scan(thresholdVal)();
-            // Progress updates arrive via _on_similar_scan_progress,
-            // completion via _on_similar_scan_complete.
             const dupContainer = document.getElementById("duplicates-render-container");
             if (dupContainer) dupContainer.innerHTML = "";
+            window.hideLoader();
             return;
         }
 
-        // If a scan is already running in background (switched tabs and came back)
         if (activeScanType === "similar" && dupResponse.total_groups === 0 && dupResponse.needs_scan !== true) {
             const scanStatus = await eel.get_similar_scan_status()();
             if (scanStatus.scanning) {
-                // Ensure the inline progress bar is visible; callbacks will update it
                 const progressEl = document.getElementById("similar-scan-progress");
                 if (progressEl) progressEl.style.display = "block";
                 const dupContainer = document.getElementById("duplicates-render-container");
                 if (dupContainer) dupContainer.innerHTML = "";
+                window.hideLoader();
                 return;
             }
         }
 
-        // Show loader only when actually scanning from scratch (not from cache)
-        if (!isCached && activeScanType === "exact") {
-            window.showLoader("Scanning exact duplicates...");
-        }
-        
         const dupGroups = dupResponse.displayed_groups || [];
         window.currentDuplicateGroups = dupGroups;
         dupTotalGroups = dupResponse.total_groups || 0;
@@ -1646,6 +1647,9 @@ let galleryCurrentPage = 0;
 let galleryTotalPages = 1;
 let gallerySimilarityMap = {};
 let gallerySimilarityReady = false;
+let gallerySortBy = "name";
+let gallerySortDesc = false;
+let galleryOnlySimilarActive = false;
 
 window.currentGalleryPageItems = [];
 window.galleryPreviewIndex = 0;
@@ -1683,7 +1687,15 @@ function _renderGalleryFolderChips() {
 
 async function loadGalleryPage(page) {
     document.getElementById("gallery-filter-banner").style.display = "none";
-    const res = await eel.get_gallery_page(galleryCurrentFolder, page, 60)();
+
+    // "Show Only Similar" is a client-side filter over the similarity map, not
+    // a normal paginated fetch — route there instead if it's active.
+    if (galleryOnlySimilarActive) {
+        _renderOnlySimilarView();
+        return;
+    }
+
+    const res = await eel.get_gallery_page(galleryCurrentFolder, page, 60, gallerySortBy, gallerySortDesc)();
     galleryCurrentPage = res.page;
     galleryTotalPages = res.total_pages;
     _updateGalleryPagination(res.total);
@@ -1768,6 +1780,40 @@ function _applyGallerySimilarityBadges() {
     });
 }
 
+function _clientSortGalleryItems(items) {
+    const dir = gallerySortDesc ? -1 : 1;
+    const sorted = [...items];
+    // These filtered views (only-similar / single-group) work off the
+    // similarity map, not a fresh backend page, so sorting happens client-side.
+    // Name uses numeric-aware localeCompare for the same "1,2,...,10" ordering
+    // the backend's natural sort gives on the main paginated grid.
+    sorted.sort((a, b) => dir * a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+    return sorted;
+}
+
+function _renderOnlySimilarView() {
+    if (!gallerySimilarityReady) {
+        showToast('Run "Find Similar Images" first.', "info");
+        galleryOnlySimilarActive = false;
+        const btn = document.getElementById("gallery-only-similar-btn");
+        if (btn) btn.classList.remove("active");
+        return;
+    }
+    const allMatchPaths = Object.keys(gallerySimilarityMap);
+    let items = allMatchPaths.map(p => {
+        const known = window.currentGalleryPageItems.find(i => i.path === p);
+        return known || { path: p, name: p.split(/[\\/]/).pop(), folder: "" };
+    });
+    items = _clientSortGalleryItems(items);
+
+    const groupCount = new Set(Object.values(gallerySimilarityMap)).size;
+    document.getElementById("gallery-pagination-bar").style.display = "none";
+    document.getElementById("gallery-filter-banner").style.display = "flex";
+    document.getElementById("gallery-filter-label").innerText =
+        `Showing only similar images (${items.length} image(s) across ${groupCount} group(s))`;
+    renderGalleryGrid(items);
+}
+
 function _filterGalleryByGroup(gid) {
     const allMatchPaths = Object.keys(gallerySimilarityMap).filter(p => gallerySimilarityMap[p] === gid);
     const items = allMatchPaths.map(p => {
@@ -1788,7 +1834,12 @@ async function _refreshGallerySimilarityMap() {
     document.getElementById("gallery-similar-count").innerText = res.ready
         ? `${res.group_count} similar-image group(s) found.`
         : (res.scanning ? "Scanning..." : "Not scanned yet.");
-    _applyGallerySimilarityBadges();
+
+    if (galleryOnlySimilarActive) {
+        _renderOnlySimilarView();
+    } else {
+        _applyGallerySimilarityBadges();
+    }
 }
 
 function initGalleryHandlers() {
@@ -1812,6 +1863,28 @@ function initGalleryHandlers() {
     document.getElementById("gallery-clear-filter-btn").addEventListener("click", () => {
         document.getElementById("gallery-filter-banner").style.display = "none";
         loadGalleryPage(galleryCurrentPage);
+    });
+
+    document.getElementById("gallery-sort-select").addEventListener("change", (e) => {
+        gallerySortBy = e.target.value;
+        loadGalleryPage(0);
+    });
+
+    document.getElementById("gallery-sort-dir-btn").addEventListener("click", (e) => {
+        gallerySortDesc = !gallerySortDesc;
+        e.target.innerHTML = gallerySortDesc ? "&darr; Desc" : "&uarr; Asc";
+        loadGalleryPage(0);
+    });
+
+    document.getElementById("gallery-only-similar-btn").addEventListener("click", (e) => {
+        galleryOnlySimilarActive = !galleryOnlySimilarActive;
+        e.target.classList.toggle("active", galleryOnlySimilarActive);
+        if (galleryOnlySimilarActive) {
+            _renderOnlySimilarView();
+        } else {
+            document.getElementById("gallery-filter-banner").style.display = "none";
+            loadGalleryPage(0);
+        }
     });
 }
 

@@ -17,7 +17,8 @@ from mover import perform_move
 from undo import save_run_log
 
 
-def find_duplicates(files: list, max_workers: int = None, size_cache: dict = None):
+def find_duplicates(files: list, max_workers: int = None, size_cache: dict = None,
+                     progress_callback=None):
     """
     Three-stage duplicate search, cheapest filter first:
       1. Group by file size - a size-unique file can't have a duplicate,
@@ -37,12 +38,20 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     full hashes. Only uncached files are hashed, then new results are
     batch-stored to SQLite.
 
+    progress_callback: optional callable(pct, message, done, total), matching
+    image_duplicates.find_similar_images()'s signature — 0-100, called during
+    both hashing stages so callers can drive a single shared progress bar.
+
     Returns (duplicate_groups, unreadable_files) - see module docstring.
     """
     by_size = defaultdict(list)
     unreadable = []
     # Also build stat info for cache lookups
     file_stats = {}
+
+    if progress_callback:
+        progress_callback(2, f"Grouping {len(files)} file(s) by size...", 0, len(files))
+
     for f in files:
         if size_cache is not None:
             sz = size_cache.get(str(f))
@@ -74,6 +83,8 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     size_groups = [g for size, g in by_size.items() if len(g) > 1 and size > 0]
     stage2_candidates = [f for g in size_groups for f in g]
     if not stage2_candidates:
+        if progress_callback:
+            progress_callback(100, "No same-size candidates found.", 0, 0)
         return [], unreadable
 
     # Try cache (#4)
@@ -82,6 +93,10 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
         cache_available = cache_store._DB_PATH is not None
     except (ImportError, AttributeError):
         cache_available = False
+
+    if progress_callback:
+        progress_callback(8, f"Checking cache for {len(stage2_candidates)} candidate(s)...",
+                           0, len(stage2_candidates))
 
     # Stage 2: partial hash with cache
     partial_hashes = {}
@@ -103,7 +118,14 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     else:
         uncached_stage2 = stage2_candidates
 
-    new_partial, unreadable_p = concurrent_hash_all(uncached_stage2, partial_hash, max_workers)
+    def _stage2_progress(done, total):
+        if progress_callback and total > 0:
+            pct = 10 + int(35 * done / total)
+            progress_callback(pct, f"Partial hashing... {done}/{total}", done, total)
+
+    new_partial, unreadable_p = concurrent_hash_all(
+        uncached_stage2, partial_hash, max_workers,
+        progress_callback=_stage2_progress if uncached_stage2 else None)
     partial_hashes.update(new_partial)
     unreadable.extend(unreadable_p)
 
@@ -117,6 +139,9 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
         if store_entries:
             cache_store.put_cached_hashes_batch(store_entries)
 
+    if progress_callback:
+        progress_callback(48, "Grouping partial-hash matches...", 0, 0)
+
     # Sub-group within each original size group
     stage3_candidates = []
     for group in size_groups:
@@ -127,9 +152,15 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
         stage3_candidates.extend(sub for sub in by_partial.values() if len(sub) > 1)
 
     if not stage3_candidates:
+        if progress_callback:
+            progress_callback(100, "No exact duplicates found.", 0, 0)
         return [], unreadable
 
     stage3_flat = [f for sub in stage3_candidates for f in sub]
+
+    if progress_callback:
+        progress_callback(50, f"Checking cache for {len(stage3_flat)} full-hash candidate(s)...",
+                           0, len(stage3_flat))
 
     # Stage 3: full hash with cache
     full_hashes = {}
@@ -151,7 +182,14 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     else:
         uncached_stage3 = stage3_flat
 
-    new_full, unreadable_f = concurrent_hash_all(uncached_stage3, file_hash, max_workers)
+    def _stage3_progress(done, total):
+        if progress_callback and total > 0:
+            pct = 55 + int(40 * done / total)
+            progress_callback(pct, f"Full hashing... {done}/{total}", done, total)
+
+    new_full, unreadable_f = concurrent_hash_all(
+        uncached_stage3, file_hash, max_workers,
+        progress_callback=_stage3_progress if uncached_stage3 else None)
     full_hashes.update(new_full)
     unreadable.extend(unreadable_f)
 
@@ -170,6 +208,11 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
         by_full[h].append(f)
 
     duplicate_groups = [g for g in by_full.values() if len(g) > 1]
+
+    if progress_callback:
+        progress_callback(100, f"Found {len(duplicate_groups)} duplicate set(s).",
+                           len(stage3_flat), len(stage3_flat))
+
     return duplicate_groups, unreadable
 
 

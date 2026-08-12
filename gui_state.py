@@ -254,14 +254,26 @@ def get_cached_duplicates():
 
     Protected by _STATE_LOCK to prevent duplicate computation from concurrent calls.
     Calls get_cached_scans() internally — safe because _STATE_LOCK is an RLock.
+
+    Pushes live progress via _push_ui_progress() while scanning, reusing the
+    same global-loader progress bar already used by organize/rename — no new
+    UI needed for the exact-duplicate scan to show real progress.
     """
     with _STATE_LOCK:
         if APP_STATE["cached_duplicates"] is None:
             all_files, _, _ = get_cached_scans()  # reentrant — RLock allows this
+
+            def _progress(pct, message, done, total):
+                if total > 0:
+                    _push_ui_progress(message, done, total)
+                else:
+                    _push_ui_progress(message, pct, 100)
+
             APP_STATE["cached_duplicates"] = find_duplicates(
-                all_files, 
+                all_files,
                 size_cache=APP_STATE.get("cached_size_cache"),
-                max_workers=APP_STATE.get("max_scan_workers")
+                max_workers=APP_STATE.get("max_scan_workers"),
+                progress_callback=_progress if all_files else None,
             )[0] if all_files else []
         return APP_STATE["cached_duplicates"]
 

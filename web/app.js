@@ -609,7 +609,7 @@ async function refreshDashboardTelemetryMetrics() {
     const activePanel = document.querySelector(".view-panel.active-view");
     if (activePanel && activePanel.id === "duplicates-panel") {
         
-        const thresholdVal = 10;
+        const thresholdVal = 10; // similar-image scanning moved to Gallery; Duplicates is exact-only now
         const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
         const isCached = dupResponse.from_cache === true;
 
@@ -1563,7 +1563,7 @@ document.getElementById("dup-jump-input").addEventListener("keydown", async (e) 
 });
 
 window._loadDuplicatePage = async function() {
-    const thresholdVal = 10; // Default threshold for duplicates
+    const thresholdVal = 10; // similar-image scanning moved to Gallery; Duplicates is exact-only now
     const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
     
     const dupGroups = dupResponse.displayed_groups || [];

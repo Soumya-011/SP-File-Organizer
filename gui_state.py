@@ -82,6 +82,11 @@ APP_STATE = {
     # Background similar-image scan state
     "_similar_scan_running": False,
     "_similar_scan_thread": None,
+
+    # Background exact-duplicate scan state (Phase 1 fix — mirrors similar-scan)
+    "_exact_scan_running": False,
+    "_exact_scan_thread": None,
+    "cached_duplicates_unreadable": 0,
 }
 
 
@@ -250,32 +255,19 @@ def get_cached_scans():
 
 
 def get_cached_duplicates():
-    """Exact-duplicate groups, computed once per scan and reused until clear_cache().
+    """Read-only accessor for exact-duplicate groups.
 
-    Protected by _STATE_LOCK to prevent duplicate computation from concurrent calls.
-    Calls get_cached_scans() internally — safe because _STATE_LOCK is an RLock.
-
-    Pushes live progress via _push_ui_progress() while scanning, reusing the
-    same global-loader progress bar already used by organize/rename — no new
-    UI needed for the exact-duplicate scan to show real progress.
+    Does NOT trigger a scan itself — this used to call find_duplicates()
+    synchronously, which blocked the Eel event loop (and the whole app UI)
+    for the entire scan. GUI callers now trigger scans exclusively through
+    gui_duplicates.start_exact_scan(), which runs find_duplicates() on a
+    background thread, mirroring how similar-image scanning already worked.
+    Returns None if no scan has completed yet — callers should check
+    get_exact_scan_status() / start_exact_scan() to find out whether one's
+    already running or needs to be kicked off.
     """
     with _STATE_LOCK:
-        if APP_STATE["cached_duplicates"] is None:
-            all_files, _, _ = get_cached_scans()  # reentrant — RLock allows this
-
-            def _progress(pct, message, done, total):
-                if total > 0:
-                    _push_ui_progress(message, done, total)
-                else:
-                    _push_ui_progress(message, pct, 100)
-
-            APP_STATE["cached_duplicates"] = find_duplicates(
-                all_files,
-                size_cache=APP_STATE.get("cached_size_cache"),
-                max_workers=APP_STATE.get("max_scan_workers"),
-                progress_callback=_progress if all_files else None,
-            )[0] if all_files else []
-        return APP_STATE["cached_duplicates"]
+        return APP_STATE.get("cached_duplicates")
 
 
 def get_cached_similar_images(threshold: int):
@@ -291,7 +283,8 @@ def get_cached_similar_images(threshold: int):
             groups, unreadable, unavailable = find_similar_images(
                 all_files, 
                 threshold=threshold,
-                max_workers=APP_STATE.get("max_scan_workers")
+                max_workers=APP_STATE.get("max_scan_workers"),
+                size_cache=APP_STATE.get("cached_size_cache"),
             )
             APP_STATE["cached_similar"] = groups
             APP_STATE["cached_similar_unreadable"] = len(unreadable)

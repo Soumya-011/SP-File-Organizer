@@ -19,6 +19,7 @@ instead of dynamic OR-chains, so they scale past SQLite's SQLITE_MAX_VARIABLE_NU
 """
 
 import json
+import hashlib
 import sqlite3
 import threading
 from pathlib import Path
@@ -46,12 +47,32 @@ def _get_db_path() -> Path:
 
 
 def init_cache_db(folder: Path):
-    """Create/open the cache database inside the primary folder's log directory."""
+    """Create/open the cache database inside the primary folder's log directory.
+
+    If a different folder was previously active in this same process (e.g.
+    the user picked a new workspace via "Change Folder" mid-session), the
+    calling thread may already hold a cached sqlite3 connection pointing at
+    the OLD folder's .cache_store.db (see _get_conn()'s threading.local()
+    reuse). Without dropping it here, that thread would keep silently
+    reading/writing the previous workspace's cache file forever, even though
+    _DB_PATH now points elsewhere.
+    """
     global _DB_PATH
     from utils import LOG_DIR_NAME
     log_dir = folder / LOG_DIR_NAME
     log_dir.mkdir(exist_ok=True)
-    _DB_PATH = log_dir / ".cache_store.db"
+    new_path = log_dir / ".cache_store.db"
+
+    if _DB_PATH != new_path:
+        stale_conn = getattr(_local, "conn", None)
+        if stale_conn is not None:
+            try:
+                stale_conn.close()
+            except Exception:
+                pass
+            _local.conn = None
+
+    _DB_PATH = new_path
     _ensure_tables()
 
 
@@ -119,6 +140,14 @@ def _ensure_tables():
                     count INTEGER,
                     label TEXT,
                     is_undone INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    scan_type TEXT PRIMARY KEY,
+                    signature TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    unreadable_count INTEGER DEFAULT 0,
+                    computed_at TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_hash_type ON hash_cache (hash_type);
@@ -514,3 +543,75 @@ def rebuild_history_manifest(folder: Path):
 def _file_key(path_str: str, mtime: float, size: int) -> str:
     """Composite key for cache lookups."""
     return f"{path_str}|{mtime}|{size}"
+
+
+# ---------------------------------------------------------------------------
+# Scan-result cache (Phase 2) — persists whole GROUPED results (not just
+# individual file hashes) so that re-opening the same, unchanged folder
+# skips walking + hashing + grouping entirely instead of just skipping the
+# hashing. Individual file hashes were already cached before this; this adds
+# a second, coarser cache layer on top of the population as a whole.
+# ---------------------------------------------------------------------------
+def compute_scan_signature(files: list, size_cache: dict = None) -> str:
+    """Cheap signature over a file population: count + total bytes.
+
+    This is a heuristic, not a guarantee — it's possible (though very rare
+    in practice) for a file to be swapped for a different one of identical
+    size, at a moment when the total byte count and file count both happen
+    to net out the same, without changing the signature. That trade-off is
+    accepted deliberately: a full walk means restat-ing everything anyway,
+    which is exactly the cost this cache exists to avoid. If size_cache is
+    supplied (as recursive_scan already produces one), no extra stat() calls
+    are made — the signature is essentially free to compute.
+    """
+    count = len(files)
+    if size_cache is not None:
+        total_size = sum(size_cache.get(str(f), 0) for f in files)
+    else:
+        total_size = 0
+        for f in files:
+            try:
+                total_size += f.stat().st_size
+            except OSError:
+                pass
+    raw = f"{count}:{total_size}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def get_cached_scan_result(scan_type: str, signature: str):
+    """Returns (groups_as_path_string_lists, unreadable_count) if a previous
+    scan of this scan_type matches the given signature exactly, else None."""
+    with _DB_LOCK:
+        conn = None
+        try:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT result_json, unreadable_count FROM scan_results WHERE scan_type=? AND signature=?",
+                (scan_type, signature)
+            ).fetchone()
+            if not row:
+                return None
+            return json.loads(row[0]), row[1]
+        except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
+            return None
+
+
+def put_cached_scan_result(scan_type: str, signature: str, groups: list, unreadable_count: int = 0):
+    """groups: list of lists of path strings. One row per scan_type — a new
+    signature simply overwrites the old one, since only the CURRENT file
+    population's result is worth keeping around."""
+    with _DB_LOCK:
+        conn = None
+        try:
+            conn = _get_conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO scan_results "
+                "(scan_type, signature, result_json, unreadable_count, computed_at) VALUES (?,?,?,?,?)",
+                (scan_type, signature, json.dumps(groups), unreadable_count, datetime.now().isoformat())
+            )
+            conn.commit()
+        except Exception:
+            if conn is not None:
+                _safe_rollback(conn)

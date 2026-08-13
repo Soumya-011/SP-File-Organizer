@@ -49,6 +49,31 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
     # Also build stat info for cache lookups
     file_stats = {}
 
+    # PERFORMANCE (Phase 2): if this exact file population (by count + total
+    # bytes) already has a completed scan result cached from a previous
+    # session, skip walking/hashing/grouping entirely and return it straight
+    # from SQLite. Individual file hashes were already cached before this —
+    # this adds a coarser cache on top so re-opening an unchanged folder
+    # doesn't even redo the (cheap but non-zero) grouping pass.
+    try:
+        import cache_store
+        _result_cache_available = cache_store._DB_PATH is not None
+    except (ImportError, AttributeError):
+        _result_cache_available = False
+
+    _signature = None
+    if _result_cache_available:
+        _signature = cache_store.compute_scan_signature(files, size_cache=size_cache)
+        _cached = cache_store.get_cached_scan_result("exact_duplicates", _signature)
+        if _cached is not None:
+            _groups_paths, _unreadable_count = _cached
+            groups = [[Path(p) for p in g] for g in _groups_paths]
+            print(f"  [scan cache] Loaded {len(groups)} cached duplicate set(s) "
+                  f"(signature {_signature}) — skipped full rescan.")
+            if progress_callback:
+                progress_callback(100, f"Loaded {len(groups)} cached duplicate set(s).", 0, 0)
+            return groups, []  # unreadable list itself isn't persisted, only its count
+
     if progress_callback:
         progress_callback(2, f"Grouping {len(files)} file(s) by size...", 0, len(files))
 
@@ -208,6 +233,17 @@ def find_duplicates(files: list, max_workers: int = None, size_cache: dict = Non
         by_full[h].append(f)
 
     duplicate_groups = [g for g in by_full.values() if len(g) > 1]
+
+    if _result_cache_available and _signature:
+        try:
+            cache_store.put_cached_scan_result(
+                "exact_duplicates", _signature,
+                [[str(p) for p in g] for g in duplicate_groups],
+                len(unreadable))
+            print(f"  [scan cache] Stored {len(duplicate_groups)} duplicate set(s) "
+                  f"under signature {_signature}.")
+        except Exception:
+            pass
 
     if progress_callback:
         progress_callback(100, f"Found {len(duplicate_groups)} duplicate set(s).",

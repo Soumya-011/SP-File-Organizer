@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 
+import cache_store
 from gui_state import (
     APP_STATE, clear_all_cache,
 )
@@ -72,6 +73,14 @@ def select_folder_native():
     chosen = result.get("chosen")
     if chosen:
         APP_STATE["folder"] = Path(chosen)
+        # FIX: this was missing — init_cache_db() previously only ran at
+        # startup when launched with --path (see gui_state.initialize_runtime_configs).
+        # Selecting a folder from inside the running app never created
+        # .cache_store.db at all, which silently no-op'd every cache_store
+        # call (thumbnails, hashes, trash index, scan-result cache) since
+        # each one already guards on `cache_store._DB_PATH is not None`.
+        cache_store.init_cache_db(APP_STATE["folder"])
+        print(f"  Cache DB ready: {cache_store._DB_PATH}")
         clear_all_cache()
         return {"status": "success", "path": chosen}
     return {"status": "cancelled"}

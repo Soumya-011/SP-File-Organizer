@@ -11,12 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 import eel
 
 from utils import format_size
-from duplicates import move_to_trash
+from duplicates import move_to_trash, find_duplicates
 from image_duplicates import find_similar_images, is_image_file
 from gui_state import (
     APP_STATE, _STATE_LOCK, _state_set,
     clear_cache, invalidate_duplicate_cache,
-    get_cached_scans, get_cached_duplicates,
+    get_cached_scans,
     _filter_safe_paths,
 )
 from gui_thumbnails import _generate_base64_thumb
@@ -57,7 +57,8 @@ def _run_similar_scan_background(threshold):
             all_files, 
             threshold=threshold, 
             progress_callback=_progress,
-            max_workers=APP_STATE.get("max_scan_workers")
+            max_workers=APP_STATE.get("max_scan_workers"),
+            size_cache=APP_STATE.get("cached_size_cache"),
         )
 
         _state_set(
@@ -88,6 +89,102 @@ def _run_similar_scan_background(threshold):
             pass
     finally:
         _state_set(_similar_scan_running=False, _similar_scan_thread=None)
+
+
+def _run_exact_scan_background():
+    """Run exact-duplicate scan in a background thread — mirrors
+    _run_similar_scan_background() above exactly, so the Eel event loop (and
+    therefore the whole app UI) is never blocked while find_duplicates() runs.
+    Previously, get_duplicate_groups_data() called find_duplicates() directly
+    and synchronously, which froze the entire app for the scan's duration.
+    """
+    _last_progress_time = [0.0]
+
+    def _progress(pct, message, done, total):
+        now = time.time()
+        if now - _last_progress_time[0] < 0.25:
+            return
+        _last_progress_time[0] = now
+        try:
+            eel._on_exact_scan_progress({
+                "pct": pct,
+                "message": message,
+                "done": done,
+                "total": total
+            })()
+        except Exception:
+            pass
+
+    try:
+        all_files, _, _ = get_cached_scans()
+        groups, unreadable = find_duplicates(
+            all_files,
+            size_cache=APP_STATE.get("cached_size_cache"),
+            max_workers=APP_STATE.get("max_scan_workers"),
+            progress_callback=_progress,
+        )
+
+        _state_set(
+            cached_duplicates=groups,
+            cached_duplicates_unreadable=len(unreadable),
+        )
+
+        try:
+            eel._on_exact_scan_complete({
+                "total_groups": len(groups),
+                "unreadable_count": len(unreadable),
+                "error": None
+            })()
+        except Exception:
+            pass
+
+    except Exception as ex:
+        try:
+            eel._on_exact_scan_complete({
+                "total_groups": 0,
+                "unreadable_count": 0,
+                "error": str(ex)
+            })()
+        except Exception:
+            pass
+    finally:
+        _state_set(_exact_scan_running=False, _exact_scan_thread=None)
+
+
+@eel.expose
+def get_exact_scan_status():
+    """Check if an exact-duplicate scan is currently running in the background."""
+    with _STATE_LOCK:
+        return {
+            "scanning": APP_STATE.get("_exact_scan_running", False),
+            "has_cached": APP_STATE.get("cached_duplicates") is not None,
+        }
+
+
+@eel.expose
+def start_exact_scan():
+    """Kick off a background exact-duplicate scan if not already running/cached."""
+    with _STATE_LOCK:
+        if APP_STATE.get("cached_duplicates") is not None:
+            return {"status": "cached", "total_groups": len(APP_STATE["cached_duplicates"])}
+        if APP_STATE.get("_exact_scan_running", False):
+            return {"status": "scanning"}
+        APP_STATE["_exact_scan_running"] = True
+        t = threading.Thread(target=_run_exact_scan_background, daemon=True)
+        APP_STATE["_exact_scan_thread"] = t
+    t.start()
+
+    return {"status": "started"}
+
+
+@eel.expose
+def _on_exact_scan_complete(result):
+    pass  # placeholder; JS side receives the call
+
+
+@eel.expose
+def _on_exact_scan_progress(data):
+    pass  # placeholder; JS side receives the call
 
 
 @eel.expose
@@ -148,12 +245,17 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
 
     if scan_type == "exact":
         with _STATE_LOCK:
-            if APP_STATE["cached_duplicates"] is not None:
+            if APP_STATE.get("cached_duplicates") is not None:
                 groups = APP_STATE["cached_duplicates"]
+                unreadable_count = APP_STATE.get("cached_duplicates_unreadable", 0)
                 from_cache = True
-        if not from_cache:
-            all_files, _, _ = get_cached_scans()
-            groups = get_cached_duplicates()
+                needs_scan = False
+            elif APP_STATE.get("_exact_scan_running", False):
+                groups = []
+                needs_scan = False
+            else:
+                groups = []
+                needs_scan = True
     else:
         with _STATE_LOCK:
             cached_threshold = APP_STATE.get("cached_similar_threshold")

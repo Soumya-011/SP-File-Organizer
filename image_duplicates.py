@@ -168,7 +168,7 @@ def _lsh_candidate_pairs(items, hash_array, num_bands=LSH_NUM_BANDS,
 
 
 def find_similar_images(files: list, threshold: int = 10, max_workers: int = None,
-                         progress_callback=None):
+                         progress_callback=None, size_cache: dict = None):
     """Returns (groups, unreadable, unavailable). `unavailable` is True only
     when Pillow itself isn't installed - distinct from "no images found" or
     "no matches found", both of which are legitimate empty results.
@@ -179,6 +179,12 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     PERFORMANCE (#5b — LSH): Grouping uses LSH banding instead of O(n^2)
     exhaustive pairwise comparison. Only candidate pairs that share at
     least one band are compared with exact Hamming distance.
+
+    PERFORMANCE (Phase 2): If this exact image population + threshold matches
+    a previously completed scan (see cache_store.compute_scan_signature),
+    the walk/hash/LSH-grouping pipeline is skipped entirely and the stored
+    result is returned directly. size_cache, if supplied, lets the
+    signature be computed with zero extra stat() calls.
 
     Args:
         progress_callback: optional callable(pct, message, done, total).
@@ -191,6 +197,28 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
     images = [f for f in files if is_image_file(f)]
     if not images:
         return [], [], False
+
+    # PERFORMANCE (Phase 2): coarse result-level cache, checked before any
+    # hashing happens.
+    try:
+        import cache_store
+        _result_cache_available = cache_store._DB_PATH is not None
+    except (ImportError, AttributeError):
+        _result_cache_available = False
+
+    _signature = None
+    _scan_type = f"similar_images_{threshold}"
+    if _result_cache_available:
+        _signature = cache_store.compute_scan_signature(images, size_cache=size_cache)
+        _cached = cache_store.get_cached_scan_result(_scan_type, _signature)
+        if _cached is not None:
+            _groups_paths, _unreadable_count = _cached
+            groups = [[Path(p) for p in g] for g in _groups_paths]
+            print(f"  [scan cache] Loaded {len(groups)} cached similar-image group(s) "
+                  f"(signature {_signature}, threshold {threshold}) — skipped full rescan.")
+            if progress_callback:
+                progress_callback(100, f"Loaded {len(groups)} cached similar-image group(s).", 0, 0)
+            return groups, [], False
 
     if progress_callback:
         progress_callback(2, f"Found {len(images)} images to analyze...", 0, len(images))
@@ -314,6 +342,17 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
         root_to_items[ds.find(item)].append(item)
 
     groups = [members for members in root_to_items.values() if len(members) > 1]
+
+    if _result_cache_available and _signature:
+        try:
+            cache_store.put_cached_scan_result(
+                _scan_type, _signature,
+                [[str(p) for p in g] for g in groups],
+                len(unreadable))
+            print(f"  [scan cache] Stored {len(groups)} similar-image group(s) "
+                  f"under signature {_signature}.")
+        except Exception:
+            pass
 
     if progress_callback:
         progress_callback(100, f"Found {len(groups)} similar groups ({total_candidate_pairs} candidate pairs checked)", n, n)

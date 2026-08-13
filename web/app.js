@@ -95,6 +95,8 @@ if (typeof eel !== "undefined") {
     eel.expose(_on_python_progress);
     eel.expose(_on_similar_scan_complete);
     eel.expose(_on_similar_scan_progress);
+    eel.expose(_on_exact_scan_complete);
+    eel.expose(_on_exact_scan_progress);
 }
 function _on_python_progress(message, current, total) {
     // Only update if loader is visible (operation is in progress)
@@ -121,6 +123,7 @@ function _on_similar_scan_complete(result) {
 
 // Called from Python with progress updates during similar-image scan
 function _on_similar_scan_progress(data) {
+    if (data.message) console.log("[similar-scan]", data.message);
     const bar = document.getElementById("gallery-scan-bar");
     const msg = document.getElementById("gallery-scan-msg");
     const counter = document.getElementById("gallery-scan-counter");
@@ -130,6 +133,44 @@ function _on_similar_scan_progress(data) {
     if (data.message) msg.innerText = data.message;
     if (counter && data.done !== undefined && data.total > 0) {
         counter.innerText = data.done + " / " + data.total;
+    }
+}
+
+// Called from Python when the background EXACT-duplicate scan completes.
+// Mirrors _on_similar_scan_complete — same non-blocking pattern, different tab.
+function _on_exact_scan_complete(result) {
+    const progressBar = document.getElementById("exact-scan-progress");
+    if (progressBar) progressBar.style.display = "none";
+
+    const dupPanel = document.getElementById("duplicates-panel");
+    if (!dupPanel || !dupPanel.classList.contains("active-view")) return;
+
+    if (result.error) {
+        const dupContainer = document.getElementById("duplicates-render-container");
+        if (dupContainer) {
+            dupContainer.innerHTML = `<div class="banner-error">Error during scan: ${_esc(result.error)}</div>`;
+        }
+        return;
+    }
+
+    dupCurrentPage = 0;
+    refreshDashboardTelemetryMetrics();
+}
+
+// Called from Python with progress updates during the background exact-duplicate scan.
+function _on_exact_scan_progress(data) {
+    if (data.message) console.log("[exact-scan]", data.message);
+    const bar = document.getElementById("exact-scan-bar");
+    const msg = document.getElementById("exact-scan-msg");
+    const counter = document.getElementById("exact-scan-counter");
+    if (!bar) return;
+    document.getElementById("exact-scan-progress").style.display = "block";
+    if (data.pct !== undefined) bar.style.width = Math.min(100, data.pct) + "%";
+    if (data.message) msg.innerText = data.message;
+    if (counter && data.done !== undefined && data.total > 0) {
+        counter.innerText = data.done + " / " + data.total;
+    } else if (counter && data.pct !== undefined) {
+        counter.innerText = data.pct + "%";
     }
 }
 
@@ -611,39 +652,43 @@ async function refreshDashboardTelemetryMetrics() {
 
         const thresholdVal = 10; // similar-image scanning moved to Gallery; Duplicates is exact-only now
 
-        // FIX (#10): loader must be shown BEFORE the blocking scan call, not after —
-        // showing it after the await had already resolved meant it never displayed
-        // real progress, since the scan was already finished by the time it appeared.
-        // find_duplicates() now pushes live progress via _on_python_progress while
-        // this call is in flight, updating this same bar. If the result turns out to
-        // be cached, the call returns almost instantly and hideLoader() below clears it.
-        window.showLoader("Checking for duplicates...");
-
+        // NON-BLOCKING (fix): get_duplicate_groups_data() now only reads
+        // cache/scan-state — it never runs find_duplicates() itself, so this
+        // call returns almost instantly and never freezes the app. If a scan
+        // is actually needed, it's kicked off as a background thread via
+        // start_exact_scan() below, exactly like similar-image scanning
+        // already works — the rest of the UI stays fully interactive while
+        // it runs, with real progress on the inline bar instead of a
+        // full-screen loader.
         const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
         const isCached = dupResponse.from_cache === true;
 
-        // Handle similar-image background scan (dead path now that Duplicates is
-        // exact-only, kept for safety in case activeScanType is ever repurposed)
-        if (dupResponse.needs_scan === true && activeScanType === "similar") {
+        if (dupResponse.needs_scan === true) {
             dupCurrentPage = 0;
-            await eel.start_similar_scan(thresholdVal)();
+            document.getElementById("exact-scan-progress").style.display = "block";
+            await eel.start_exact_scan()();
+            // Progress arrives via _on_exact_scan_progress; completion via
+            // _on_exact_scan_complete, which re-calls this function.
             const dupContainer = document.getElementById("duplicates-render-container");
             if (dupContainer) dupContainer.innerHTML = "";
-            window.hideLoader();
             return;
         }
 
-        if (activeScanType === "similar" && dupResponse.total_groups === 0 && dupResponse.needs_scan !== true) {
-            const scanStatus = await eel.get_similar_scan_status()();
+        // A scan may already be running in the background (e.g. user switched
+        // tabs away and back) — just make sure the progress bar is visible;
+        // updates keep arriving via the same push handlers.
+        if (dupResponse.total_groups === 0 && !isCached) {
+            const scanStatus = await eel.get_exact_scan_status()();
             if (scanStatus.scanning) {
-                const progressEl = document.getElementById("similar-scan-progress");
+                const progressEl = document.getElementById("exact-scan-progress");
                 if (progressEl) progressEl.style.display = "block";
                 const dupContainer = document.getElementById("duplicates-render-container");
                 if (dupContainer) dupContainer.innerHTML = "";
-                window.hideLoader();
                 return;
             }
         }
+
+        document.getElementById("exact-scan-progress").style.display = "none";
 
         const dupGroups = dupResponse.displayed_groups || [];
         window.currentDuplicateGroups = dupGroups;

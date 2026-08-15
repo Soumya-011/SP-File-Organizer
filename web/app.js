@@ -1134,6 +1134,9 @@ document.addEventListener("keydown", (e) => {
                 window.openGalleryImagePreview((window.galleryPreviewIndex + 1) % items.length);
             } else if (e.key === "ArrowLeft") {
                 window.openGalleryImagePreview((window.galleryPreviewIndex - 1 + items.length) % items.length);
+            } else if (e.key === "Delete") {
+                e.preventDefault();
+                _deleteCurrentGalleryPreviewImage();
             } else if (e.key === "Escape") {
                 modal.style.display = "none";
                 window.galleryPreviewActive = false;
@@ -1146,6 +1149,9 @@ document.addEventListener("keydown", (e) => {
             } else if (e.key === "ArrowLeft") {
                 let prev = (window.currentPreviewFidx - 1 + groupFiles.length) % groupFiles.length;
                 window.openImagePreview(window.currentPreviewGidx, prev);
+            } else if (e.key === "Delete") {
+                e.preventDefault();
+                _deleteCurrentDuplicatePreviewImage();
             } else if (e.key === "Escape") {
                 modal.style.display = "none";
             }
@@ -1695,6 +1701,10 @@ let gallerySimilarityReady = false;
 let gallerySortBy = "name";
 let gallerySortDesc = false;
 let galleryOnlySimilarActive = false;
+let galleryOnlySimilarAllItems = [];
+let galleryOnlySimilarPage = 0;
+const GALLERY_PAGE_SIZE = 60;
+let gallerySelectedPaths = new Set();
 
 window.currentGalleryPageItems = [];
 window.galleryPreviewIndex = 0;
@@ -1740,22 +1750,24 @@ async function loadGalleryPage(page) {
         return;
     }
 
-    const res = await eel.get_gallery_page(galleryCurrentFolder, page, 60, gallerySortBy, gallerySortDesc)();
+    const res = await eel.get_gallery_page(galleryCurrentFolder, page, GALLERY_PAGE_SIZE, gallerySortBy, gallerySortDesc)();
     galleryCurrentPage = res.page;
     galleryTotalPages = res.total_pages;
-    _updateGalleryPagination(res.total);
+    _updateGalleryPagination(res.total, res.total_pages, res.page);
     renderGalleryGrid(res.items);
 }
 
-function _updateGalleryPagination(total) {
+function _updateGalleryPagination(total, totalPages, currentPage) {
     const bar = document.getElementById("gallery-pagination-bar");
     if (!bar) return;
-    if (galleryTotalPages > 1) {
+    const tp = totalPages !== undefined ? totalPages : galleryTotalPages;
+    const cp = currentPage !== undefined ? currentPage : galleryCurrentPage;
+    if (tp > 1) {
         bar.style.display = "flex";
         document.getElementById("gallery-page-info").innerText =
-            `Page ${galleryCurrentPage + 1} of ${galleryTotalPages} (${total.toLocaleString()} images)`;
-        document.getElementById("gallery-prev-btn").disabled = (galleryCurrentPage <= 0);
-        document.getElementById("gallery-next-btn").disabled = (galleryCurrentPage >= galleryTotalPages - 1);
+            `Page ${cp + 1} of ${tp} (${total.toLocaleString()} images)`;
+        document.getElementById("gallery-prev-btn").disabled = (cp <= 0);
+        document.getElementById("gallery-next-btn").disabled = (cp >= tp - 1);
     } else {
         bar.style.display = "none";
     }
@@ -1763,6 +1775,9 @@ function _updateGalleryPagination(total) {
 
 function renderGalleryGrid(items) {
     window.currentGalleryPageItems = items;
+    gallerySelectedPaths.clear();
+    _updateGallerySelectionUI();
+
     const grid = document.getElementById("gallery-grid");
     grid.innerHTML = "";
     if (items.length === 0) {
@@ -1774,16 +1789,67 @@ function renderGalleryGrid(items) {
         tile.className = "gallery-tile thumb-placeholder";
         tile.setAttribute("data-path", item.path);
         tile.innerHTML = `
+            <input type="checkbox" class="gallery-tile-checkbox" title="Select for deletion">
             <div class="gallery-tile-inner">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="gallery-tile-icon"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
             </div>
             <div class="gallery-tile-name" title="${_attrEsc(item.name)}">${_esc(item.name)}</div>
         `;
+        const checkbox = tile.querySelector(".gallery-tile-checkbox");
+        checkbox.addEventListener("click", (e) => e.stopPropagation());
+        checkbox.addEventListener("change", (e) => {
+            if (e.target.checked) gallerySelectedPaths.add(item.path);
+            else gallerySelectedPaths.delete(item.path);
+            tile.classList.toggle("selected", e.target.checked);
+            _updateGallerySelectionUI();
+        });
         tile.addEventListener("click", () => window.openGalleryImagePreview(idx));
         grid.appendChild(tile);
     });
     _applyGallerySimilarityBadges();
     _loadGalleryThumbnails(items);
+}
+
+function _updateGallerySelectionUI() {
+    const btn = document.getElementById("gallery-delete-selected-btn");
+    const countEl = document.getElementById("gallery-selection-count");
+    const count = gallerySelectedPaths.size;
+    if (btn) {
+        btn.disabled = count === 0;
+        btn.innerText = count > 0 ? `Delete Selected (${count})` : "Delete Selected";
+    }
+    if (countEl) countEl.innerText = count > 0 ? `${count} selected` : "";
+}
+
+async function _deleteGalleryPaths(paths) {
+    if (!paths || paths.length === 0) return;
+    const res = await eel.purge_selected_duplicates(paths)();
+    if (res.status !== "success") {
+        showToast(res.message || "Failed to delete selected image(s).", "error");
+        return;
+    }
+    showToast(`Moved ${res.purged} image(s) to the Recycle Bin.`, "success");
+    gallerySelectedPaths.clear();
+    await _afterGalleryDeletion();
+}
+
+async function _afterGalleryDeletion() {
+    // Deleting changes the file population, so any cached similarity grouping
+    // is now stale (the backend already invalidated it — see
+    // invalidate_duplicate_cache() in purge_selected_duplicates()). Drop back
+    // to the normal grid rather than show a stale or empty "only similar"
+    // view; the user re-runs Find Similar Images if they want fresh groups.
+    galleryOnlySimilarActive = false;
+    const onlySimilarBtn = document.getElementById("gallery-only-similar-btn");
+    if (onlySimilarBtn) onlySimilarBtn.classList.remove("active");
+    gallerySimilarityReady = false;
+    gallerySimilarityMap = {};
+    document.getElementById("gallery-similar-count").innerText = "Not scanned yet.";
+    document.getElementById("gallery-filter-banner").style.display = "none";
+
+    galleryFolders = await eel.get_gallery_folders()();
+    _renderGalleryFolderChips();
+    await loadGalleryPage(galleryCurrentPage);
 }
 
 async function _loadGalleryThumbnails(items) {
@@ -1850,13 +1916,25 @@ function _renderOnlySimilarView() {
         return known || { path: p, name: p.split(/[\\/]/).pop(), folder: "" };
     });
     items = _clientSortGalleryItems(items);
+    galleryOnlySimilarAllItems = items;
+    galleryOnlySimilarPage = 0;
+    _renderOnlySimilarPage();
+}
+
+function _renderOnlySimilarPage() {
+    const items = galleryOnlySimilarAllItems;
+    const totalPages = Math.max(1, Math.ceil(items.length / GALLERY_PAGE_SIZE));
+    galleryOnlySimilarPage = Math.max(0, Math.min(galleryOnlySimilarPage, totalPages - 1));
+    const start = galleryOnlySimilarPage * GALLERY_PAGE_SIZE;
+    const pageItems = items.slice(start, start + GALLERY_PAGE_SIZE);
 
     const groupCount = new Set(Object.values(gallerySimilarityMap)).size;
-    document.getElementById("gallery-pagination-bar").style.display = "none";
     document.getElementById("gallery-filter-banner").style.display = "flex";
     document.getElementById("gallery-filter-label").innerText =
         `Showing only similar images (${items.length} image(s) across ${groupCount} group(s))`;
-    renderGalleryGrid(items);
+
+    _updateGalleryPagination(items.length, totalPages, galleryOnlySimilarPage);
+    renderGalleryGrid(pageItems);
 }
 
 function _filterGalleryByGroup(gid) {
@@ -1900,10 +1978,25 @@ function initGalleryHandlers() {
     });
 
     document.getElementById("gallery-prev-btn").addEventListener("click", () => {
-        if (galleryCurrentPage > 0) loadGalleryPage(galleryCurrentPage - 1);
+        if (galleryOnlySimilarActive) {
+            if (galleryOnlySimilarPage > 0) {
+                galleryOnlySimilarPage--;
+                _renderOnlySimilarPage();
+            }
+        } else if (galleryCurrentPage > 0) {
+            loadGalleryPage(galleryCurrentPage - 1);
+        }
     });
     document.getElementById("gallery-next-btn").addEventListener("click", () => {
-        if (galleryCurrentPage < galleryTotalPages - 1) loadGalleryPage(galleryCurrentPage + 1);
+        if (galleryOnlySimilarActive) {
+            const totalPages = Math.max(1, Math.ceil(galleryOnlySimilarAllItems.length / GALLERY_PAGE_SIZE));
+            if (galleryOnlySimilarPage < totalPages - 1) {
+                galleryOnlySimilarPage++;
+                _renderOnlySimilarPage();
+            }
+        } else if (galleryCurrentPage < galleryTotalPages - 1) {
+            loadGalleryPage(galleryCurrentPage + 1);
+        }
     });
     document.getElementById("gallery-clear-filter-btn").addEventListener("click", () => {
         document.getElementById("gallery-filter-banner").style.display = "none";
@@ -1930,6 +2023,26 @@ function initGalleryHandlers() {
             document.getElementById("gallery-filter-banner").style.display = "none";
             loadGalleryPage(0);
         }
+    });
+
+    document.getElementById("gallery-select-all-btn").addEventListener("click", () => {
+        const checkboxes = document.querySelectorAll(".gallery-tile-checkbox");
+        const allSelected = gallerySelectedPaths.size === checkboxes.length && checkboxes.length > 0;
+        checkboxes.forEach(cb => {
+            cb.checked = !allSelected;
+            cb.dispatchEvent(new Event("change"));
+        });
+    });
+
+    document.getElementById("gallery-delete-selected-btn").addEventListener("click", async () => {
+        if (gallerySelectedPaths.size === 0) return;
+        const proceed = await _showSimpleConfirmModal(
+            "Move to Recycle Bin",
+            `Move ${gallerySelectedPaths.size} selected image(s) to the Recycle Bin? You can restore them later from Undo History.`,
+            "#D97706"
+        );
+        if (!proceed) return;
+        await _deleteGalleryPaths(Array.from(gallerySelectedPaths));
     });
 }
 
@@ -1958,3 +2071,72 @@ window.openGalleryImagePreview = async function (idx) {
         loader.innerText = "Error loading high resolution image data.";
     }
 };
+
+// Delete-key shortcut in the Gallery lightbox: moves the currently open
+// image to the Recycle Bin, then shows the next one (or closes if that was
+// the last image on this page).
+async function _deleteCurrentGalleryPreviewImage() {
+    const items = window.currentGalleryPageItems;
+    if (!items || items.length === 0) return;
+    const target = items[window.galleryPreviewIndex];
+    if (!target) return;
+
+    const res = await eel.purge_selected_duplicates([target.path])();
+    if (res.status !== "success") {
+        showToast(res.message || "Failed to delete image.", "error");
+        return;
+    }
+    showToast(`Moved "${target.name}" to the Recycle Bin.`, "success");
+
+    // Similarity grouping is now stale (file population changed) — same
+    // reasoning as the bulk-delete toolbar.
+    galleryOnlySimilarActive = false;
+    const onlySimilarBtn = document.getElementById("gallery-only-similar-btn");
+    if (onlySimilarBtn) onlySimilarBtn.classList.remove("active");
+    gallerySimilarityReady = false;
+    gallerySimilarityMap = {};
+    document.getElementById("gallery-similar-count").innerText = "Not scanned yet.";
+    document.getElementById("gallery-filter-banner").style.display = "none";
+
+    const removedIndex = window.galleryPreviewIndex;
+    items.splice(removedIndex, 1);
+
+    galleryFolders = await eel.get_gallery_folders()();
+    _renderGalleryFolderChips();
+
+    if (items.length === 0) {
+        document.getElementById("image-preview-modal").style.display = "none";
+        window.galleryPreviewActive = false;
+        await loadGalleryPage(galleryCurrentPage);
+        return;
+    }
+
+    // Full re-render rebinds every tile's click handler to its new (shifted)
+    // index — splicing the array alone would leave stale onclick indices on
+    // every tile after the deleted one.
+    renderGalleryGrid(items);
+    const nextIndex = Math.min(removedIndex, items.length - 1);
+    window.openGalleryImagePreview(nextIndex);
+}
+
+// Same shortcut for the Duplicates-panel lightbox. Always closes and does a
+// full panel refresh (rather than advancing in place like the gallery does)
+// because each row's thumbnail has its file index baked into an inline
+// onclick handler at render time — splicing the in-memory array without a
+// full re-render would leave those handlers pointing at the wrong file.
+async function _deleteCurrentDuplicatePreviewImage() {
+    const group = window.currentDuplicateGroups[window.currentPreviewGidx];
+    if (!group) return;
+    const target = group.files[window.currentPreviewFidx];
+    if (!target) return;
+
+    const res = await eel.purge_selected_duplicates([target.path])();
+    if (res.status !== "success") {
+        showToast(res.message || "Failed to delete image.", "error");
+        return;
+    }
+    showToast(`Moved "${target.name}" to the Recycle Bin.`, "success");
+
+    document.getElementById("image-preview-modal").style.display = "none";
+    await refreshDashboardTelemetryMetrics();
+}

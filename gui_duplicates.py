@@ -68,7 +68,14 @@ def _run_similar_scan_background(threshold):
             cached_similar_threshold=threshold,
         )
 
-        # Push results to frontend
+        # FIX: flag must flip BEFORE the completion push, not after (was in a
+        # `finally` block that ran AFTER this). The frontend's completion
+        # handler immediately calls back into Python to fetch the similarity
+        # map — if it arrived while this flag was still True, that call saw
+        # "still scanning" and silently returned nothing, so badges only
+        # appeared after a second manual click re-triggered the fetch.
+        _state_set(_similar_scan_running=False, _similar_scan_thread=None)
+
         try:
             eel._on_similar_scan_complete({
                 "total_groups": len(groups),
@@ -79,6 +86,7 @@ def _run_similar_scan_background(threshold):
             pass
 
     except Exception as ex:
+        _state_set(_similar_scan_running=False, _similar_scan_thread=None)
         try:
             eel._on_similar_scan_complete({
                 "total_groups": 0,
@@ -87,8 +95,6 @@ def _run_similar_scan_background(threshold):
             })()
         except Exception:
             pass
-    finally:
-        _state_set(_similar_scan_running=False, _similar_scan_thread=None)
 
 
 def _run_exact_scan_background():
@@ -129,6 +135,8 @@ def _run_exact_scan_background():
             cached_duplicates_unreadable=len(unreadable),
         )
 
+        _state_set(_exact_scan_running=False, _exact_scan_thread=None)
+
         try:
             eel._on_exact_scan_complete({
                 "total_groups": len(groups),
@@ -139,6 +147,7 @@ def _run_exact_scan_background():
             pass
 
     except Exception as ex:
+        _state_set(_exact_scan_running=False, _exact_scan_thread=None)
         try:
             eel._on_exact_scan_complete({
                 "total_groups": 0,
@@ -147,8 +156,6 @@ def _run_exact_scan_background():
             })()
         except Exception:
             pass
-    finally:
-        _state_set(_exact_scan_running=False, _exact_scan_thread=None)
 
 
 @eel.expose

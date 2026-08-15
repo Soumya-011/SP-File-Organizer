@@ -868,3 +868,43 @@ body {
     border-color: var(--accent-blue);
     color: #fff;
 }
+
+/* Gallery multi-select */
+.gallery-selection-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--stroke-color);
+}
+
+.gallery-tile-checkbox {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    width: 18px;
+    height: 18px;
+    z-index: 2;
+    cursor: pointer;
+    accent-color: var(--accent-blue);
+}
+
+.gallery-tile.selected {
+    outline: 3px solid var(--accent-blue);
+    outline-offset: -3px;
+}
+
+.ui-btn.danger {
+    background-color: var(--status-alert-bg);
+    border-color: #FECACA;
+    color: var(--status-alert);
+}
+.ui-btn.danger:hover {
+    background-color: var(--status-alert);
+    color: #fff;
+}
+.ui-btn.danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

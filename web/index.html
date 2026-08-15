@@ -305,6 +305,11 @@
                     </div>
 
                     <div class="ui-card">
+                        <div class="gallery-selection-toolbar">
+                            <button class="ui-btn secondary" id="gallery-select-all-btn" style="padding:5px 12px; font-size:12px;">Select All On Page</button>
+                            <span id="gallery-selection-count" style="font-size:12px; color:var(--text-secondary);"></span>
+                            <button class="ui-btn danger" id="gallery-delete-selected-btn" style="padding:5px 14px; font-size:12px; margin-left:auto;" disabled>Delete Selected</button>
+                        </div>
                         <div id="gallery-grid" class="gallery-grid"></div>
                         <div id="gallery-pagination-bar" class="gallery-pagination-bar" style="display:none;">
                             <button class="ui-btn secondary" id="gallery-prev-btn" style="padding:5px 12px; font-size:12px;">Previous</button>
@@ -479,7 +484,7 @@
             <img id="preview-modal-img" src="" style="max-width:100%; max-height:80vh; border-radius:8px; display:none; box-shadow: 0 4px 20px rgba(0,0,0,0.8);">
             
             <div id="preview-footer-text" style="color:var(--text-secondary); margin-top:16px; font-size:13px; font-weight:500;">
-                Use <span style="color:#fff">&larr; Left</span> and <span style="color:#fff">Right &rarr;</span> arrow keys to navigate within this matching set
+                Use <span style="color:#fff">&larr; Left</span> and <span style="color:#fff">Right &rarr;</span> to navigate, <span style="color:#fff">Delete</span> to move this image to the Recycle Bin
                 <br><span id="preview-file-info" style="color: #98A2B3; font-size: 11.5px; display: block; margin-top: 8px;"></span>
             </div>
         </div>

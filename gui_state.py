@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import eel
 
-from config import load_config, build_ext_to_category
+from config import load_config, build_ext_to_category, load_raw_config, save_raw_config
 from scanner import scan_folder, recursive_scan, bucket_files
 import cache_store
 from duplicates import find_duplicates
@@ -134,6 +134,35 @@ def _push_ui_progress(message: str, current: int = 0, total: int = 0):
 @eel.expose
 def _on_python_progress(message, current, total):
     pass  # placeholder; JS side receives the call
+
+
+@eel.expose
+def log_to_terminal(message):
+    """Generic JS -> Python terminal logging bridge. Eel's chrome/edge
+    app-mode window doesn't expose DevTools by default, so console.log()
+    calls from background frontend activity (e.g. the idle-scan cycle in
+    app.js) are otherwise invisible — there's no page to right-click
+    "Inspect" on. This surfaces them in the same terminal the rest of the
+    app already prints to."""
+    print(message)
+
+
+@eel.expose
+def save_window_size(width, height):
+    """Persist the window size to config.json so gui.py can restore it on
+    the next launch. Called from the frontend on a DEBOUNCED resize event,
+    not on window close — Eel's underlying chrome/edge subprocess can
+    terminate before an async eel call made from a 'beforeunload' handler
+    reliably completes, so catching every resize (not just the final one)
+    is the more robust approach."""
+    try:
+        raw_config = load_raw_config(APP_STATE["config_path"])
+        raw_config["window_width"] = int(width)
+        raw_config["window_height"] = int(height)
+        save_raw_config(APP_STATE["config_path"], raw_config)
+    except Exception:
+        pass
+    return {"status": "ok"}
 
 
 # --- Cache management ---

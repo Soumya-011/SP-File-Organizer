@@ -239,6 +239,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initPerformanceHandlers();
     initIdleAutoScan();
     initSidebarToggle();
+    initFileBrowserHandlers();
 });
 
 // ---------------------------------------------------------------------------
@@ -246,6 +247,162 @@ document.addEventListener("DOMContentLoaded", () => {
 // Chrome window via Eel, not the claude.ai artifact sandbox that restricts
 // browser storage, so this is fine here).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Remember window size across restarts. Saves on a DEBOUNCED resize event
+// (not just on close) since Eel's underlying browser subprocess can
+// terminate before an async call from a 'beforeunload' handler reliably
+// finishes — catching every resize as it settles is more robust than
+// betting on the final close event landing in time.
+// ---------------------------------------------------------------------------
+let _resizeSaveTimer = null;
+window.addEventListener("resize", () => {
+    clearTimeout(_resizeSaveTimer);
+    _resizeSaveTimer = setTimeout(() => {
+        if (typeof eel !== "undefined" && eel.save_window_size) {
+            eel.save_window_size(window.outerWidth, window.outerHeight)();
+        }
+    }, 600);
+});
+
+// Best-effort extra save right before the window closes, in case the very
+// last resize happened less than 600ms before close (so the debounce above
+// never fired for it). Not relied upon as the primary mechanism.
+window.addEventListener("beforeunload", () => {
+    if (typeof eel !== "undefined" && eel.save_window_size) {
+        try { eel.save_window_size(window.outerWidth, window.outerHeight)(); } catch (e) { /* non-fatal */ }
+    }
+});
+
+// ---------------------------------------------------------------------------
+// File Browser (Overview tab, Phase B) — search/sort/filter across every
+// file type, recursively. Double-click-to-open and folder navigation are
+// deliberately not part of this yet — that's Phase C, built on top later.
+// ---------------------------------------------------------------------------
+let fbCurrentPage = 0;
+let fbTotalPages = 1;
+let fbSortBy = "name";
+let fbSortDesc = false;
+let fbNameFilter = "";
+let fbCategoryFilter = "";
+let fbExtFilter = "";
+
+async function initFileBrowser() {
+    await _loadFileBrowserFacets();
+    await loadFileBrowserPage(0);
+}
+
+async function _loadFileBrowserFacets() {
+    const facets = await eel.get_file_browser_facets()();
+
+    const chipRow = document.getElementById("fb-category-chips");
+    chipRow.innerHTML = "";
+    const allChip = document.createElement("button");
+    allChip.className = "gallery-folder-chip" + (fbCategoryFilter === "" ? " active" : "");
+    allChip.innerText = `All (${facets.total})`;
+    allChip.addEventListener("click", () => { fbCategoryFilter = ""; _renderFbChipsActive(); loadFileBrowserPage(0); });
+    chipRow.appendChild(allChip);
+
+    facets.categories.forEach(c => {
+        const chip = document.createElement("button");
+        chip.className = "gallery-folder-chip" + (fbCategoryFilter === c.name ? " active" : "");
+        chip.setAttribute("data-cat", c.name);
+        chip.innerText = `${c.name} (${c.count})`;
+        chip.addEventListener("click", () => { fbCategoryFilter = c.name; _renderFbChipsActive(); loadFileBrowserPage(0); });
+        chipRow.appendChild(chip);
+    });
+
+    const extSelect = document.getElementById("fb-ext-select");
+    const currentExtValue = extSelect.value;
+    extSelect.innerHTML = '<option value="">All extensions</option>';
+    facets.extensions.forEach(e => {
+        const opt = document.createElement("option");
+        opt.value = e.ext;
+        opt.innerText = `${e.ext} (${e.count})`;
+        extSelect.appendChild(opt);
+    });
+    extSelect.value = currentExtValue;
+}
+
+function _renderFbChipsActive() {
+    document.querySelectorAll("#fb-category-chips .gallery-folder-chip").forEach(chip => {
+        const isAll = chip.innerText.startsWith("All (");
+        const cat = chip.getAttribute("data-cat");
+        chip.classList.toggle("active", isAll ? fbCategoryFilter === "" : cat === fbCategoryFilter);
+    });
+}
+
+async function loadFileBrowserPage(page) {
+    const res = await eel.get_file_browser_page(
+        page, 60, fbSortBy, fbSortDesc, fbNameFilter, fbCategoryFilter, fbExtFilter
+    )();
+
+    fbCurrentPage = res.page;
+    fbTotalPages = res.total_pages;
+
+    document.getElementById("fb-result-count").innerText = `${res.total.toLocaleString()} file(s)`;
+
+    const bar = document.getElementById("fb-pagination-bar");
+    if (fbTotalPages > 1) {
+        bar.style.display = "flex";
+        document.getElementById("fb-page-info").innerText = `Page ${fbCurrentPage + 1} of ${fbTotalPages}`;
+        document.getElementById("fb-prev-btn").disabled = (fbCurrentPage <= 0);
+        document.getElementById("fb-next-btn").disabled = (fbCurrentPage >= fbTotalPages - 1);
+    } else {
+        bar.style.display = "none";
+    }
+
+    const tbody = document.getElementById("fb-table-body");
+    tbody.innerHTML = "";
+    if (res.items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center-cell">No files match this search/filter.</td></tr>';
+        return;
+    }
+    res.items.forEach(item => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+            <td class="tbl-cell" style="font-weight:500;" title="${_attrEsc(item.path)}">${_esc(item.name)}</td>
+            <td class="tbl-cell"><span class="org-preview-tag">${_esc(item.category)}</span></td>
+            <td class="tbl-cell-mono" style="font-size:11.5px; color:var(--text-secondary);">${_esc(item.ext)}</td>
+            <td class="tbl-cell" style="text-align:right; color:var(--text-secondary);">${_esc(item.size_str)}</td>
+            <td class="tbl-cell-mono" style="font-size:11.5px; color:var(--text-secondary);" title="${_attrEsc(item.folder)}">${_esc(item.folder)}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function initFileBrowserHandlers() {
+    const debouncedSearch = _debounce((value) => {
+        fbNameFilter = value;
+        loadFileBrowserPage(0);
+    }, 350);
+    document.getElementById("fb-search-input").addEventListener("input", (e) => {
+        debouncedSearch(e.target.value);
+    });
+
+    document.getElementById("fb-ext-select").addEventListener("change", (e) => {
+        fbExtFilter = e.target.value;
+        loadFileBrowserPage(0);
+    });
+
+    document.getElementById("fb-sort-select").addEventListener("change", (e) => {
+        fbSortBy = e.target.value;
+        loadFileBrowserPage(0);
+    });
+
+    document.getElementById("fb-sort-dir-btn").addEventListener("click", (e) => {
+        fbSortDesc = !fbSortDesc;
+        e.target.innerHTML = fbSortDesc ? "&darr; Desc" : "&uarr; Asc";
+        loadFileBrowserPage(0);
+    });
+
+    document.getElementById("fb-prev-btn").addEventListener("click", () => {
+        if (fbCurrentPage > 0) loadFileBrowserPage(fbCurrentPage - 1);
+    });
+    document.getElementById("fb-next-btn").addEventListener("click", () => {
+        if (fbCurrentPage < fbTotalPages - 1) loadFileBrowserPage(fbCurrentPage + 1);
+    });
+}
+
 function initSidebarToggle() {
     const sidebar = document.getElementById("app-sidebar");
     const btn = document.getElementById("sidebar-toggle-btn");
@@ -287,6 +444,9 @@ function initViewPanelNavigation() {
 
             if (target === "gallery-panel") {
                 loadGalleryData();
+            } else if (target === "overview-panel") {
+                refreshDashboardTelemetryMetrics();
+                initFileBrowser();
             } else {
                 refreshDashboardTelemetryMetrics();
             }
@@ -533,6 +693,7 @@ async function initApplicationContextData() {
     if (metadata.folder) {
         window.showLoader("Scanning workspace, please wait...");
         await refreshDashboardTelemetryMetrics();
+        await initFileBrowser();
         window.hideLoader();
     }
 }
@@ -1065,6 +1226,7 @@ function initInteractivityHandlers() {
                 document.getElementById("current-path-display").innerText = res.path;
                 window.showLoader("Scanning new workspace, please wait...");
                 await refreshDashboardTelemetryMetrics();
+                await initFileBrowser();
                 window.hideLoader();
                 if (document.getElementById("rename-workspace-section").style.display === "block") populateRenameCategories();
             } else if (res.status === "error") {
@@ -2147,7 +2309,7 @@ async function _refreshGallerySimilarityMap() {
 let _lastActivityTime = Date.now();
 let _idleScanFired = false;
 let idleAutoScanEnabled = true;
-const IDLE_THRESHOLD_MS = 90 * 1000;   // consider "idle" after 90s of no input
+const IDLE_THRESHOLD_MS = 60 * 1000;   // consider "idle" after 60s of no input
 const IDLE_CHECK_INTERVAL_MS = 15 * 1000;
 const IDLE_SCAN_THRESHOLDS = [5, 10, 16]; // Strict, Normal, Loose — see SIMILARITY_PRESETS
 
@@ -2187,6 +2349,18 @@ function initIdleAutoScan() {
     }, IDLE_CHECK_INTERVAL_MS);
 }
 
+// Mirrors a message to both the browser DevTools console AND the Python
+// terminal (via gui_state.log_to_terminal). Eel's chrome/edge app-mode
+// window doesn't expose DevTools by default, so background activity like
+// the idle-scan cycle would otherwise be invisible unless it happens to
+// touch something already rendered on screen.
+function _logBoth(msg) {
+    console.log(msg);
+    if (typeof eel !== "undefined" && eel.log_to_terminal) {
+        eel.log_to_terminal(msg)();
+    }
+}
+
 // Cycles Strict/Normal/Loose sequentially — the backend only runs one
 // background scan thread at a time, so firing all three at once would just
 // make start_idle_similar_scan() no-op on the 2nd and 3rd with
@@ -2197,7 +2371,7 @@ function initIdleAutoScan() {
 async function _runIdleScanCycle() {
     for (const threshold of IDLE_SCAN_THRESHOLDS) {
         if (Date.now() - _lastActivityTime < IDLE_THRESHOLD_MS) {
-            console.log("[idle-scan] Activity detected — stopping idle cycle.");
+            _logBoth("[idle-scan] Activity detected — stopping idle cycle.");
             return;
         }
         if (!idleAutoScanEnabled) return;
@@ -2205,7 +2379,7 @@ async function _runIdleScanCycle() {
         const status = await eel.get_similar_scan_status()();
         if (status.scanning) return; // don't pile onto a scan started elsewhere
 
-        console.log(`[idle-scan] Warming threshold ${threshold} (capped to 2 cores)...`);
+        _logBoth(`[idle-scan] Warming threshold ${threshold} (capped to 2 cores)...`);
         const res = await eel.start_idle_similar_scan(threshold)();
 
         if (res.status === "started") {
@@ -2220,7 +2394,7 @@ async function _runIdleScanCycle() {
         // "cached": already warm on disk — start_idle_similar_scan() returned
         // instantly, nothing to wait for; move straight to the next threshold.
     }
-    console.log("[idle-scan] Idle cycle complete — Strict/Normal/Loose all pre-cached.");
+    _logBoth("[idle-scan] Idle cycle complete — Strict/Normal/Loose all pre-cached.");
     // If the person is sitting on the Gallery tab right now, refresh the
     // badge overlay so the newly-warmed thresholds are reflected without
     // needing to touch anything.

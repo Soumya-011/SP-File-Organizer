@@ -31,12 +31,30 @@ import gui_dashboard   # get_dashboard_batch, get_system_metadata, etc.
 import gui_organize    # trigger_bulk_organization, etc.
 import gui_duplicates  # get_duplicate_groups_data, start_similar_scan, etc.
 import gui_gallery     # get_gallery_folders, get_gallery_page, similarity map
+import gui_file_browser # get_file_browser_page, get_file_browser_facets (Overview search)
 import gui_history     # restore_from_bin, empty_trash_completely, etc.
 import gui_admin       # verify_admin_pin, update_category, etc.
 import gui_folders     # select_folder_native, add_comparison_folder, etc.
 
 def launch_gui(config_path, initial_folder=None):
     gui_state.initialize_runtime_configs(config_path, initial_folder)
+
+    # Restore the last window size if one was saved (see save_window_size in
+    # gui_state.py, called from the frontend on a debounced resize event).
+    # Clamped to sane bounds in case the stored value is corrupted or a
+    # leftover from an absurd multi-monitor setup that isn't available now.
+    from config import load_raw_config
+    raw_config = load_raw_config(config_path)
+    saved_width = raw_config.get("window_width")
+    saved_height = raw_config.get("window_height")
+    try:
+        width = max(600, min(int(saved_width), 4000)) if saved_width else 1120
+    except (TypeError, ValueError):
+        width = 1120
+    try:
+        height = max(400, min(int(saved_height), 3000)) if saved_height else 820
+    except (TypeError, ValueError):
+        height = 820
 
     # PERFORMANCE (app-lighter, tier 3): on Windows, prefer 'edge' mode,
     # which reuses the OS's built-in WebView2 runtime instead of spawning a
@@ -52,14 +70,14 @@ def launch_gui(config_path, initial_folder=None):
     preferred_mode = 'edge' if platform.system() == 'Windows' else 'chrome'
 
     try:
-        eel.start('index.html', size=(1120, 820), mode=preferred_mode)
+        eel.start('index.html', size=(width, height), mode=preferred_mode)
     except (SystemExit, MemoryError, KeyboardInterrupt):
         pass
     except Exception as e:
         if preferred_mode != 'chrome':
             print(f"  Could not start in '{preferred_mode}' mode ({e}). Falling back to Chrome.")
             try:
-                eel.start('index.html', size=(1120, 820), mode='chrome')
+                eel.start('index.html', size=(width, height), mode='chrome')
             except (SystemExit, MemoryError, KeyboardInterrupt):
                 pass
         else:

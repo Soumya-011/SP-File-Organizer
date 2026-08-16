@@ -82,6 +82,21 @@ def select_folder_native():
         cache_store.init_cache_db(APP_STATE["folder"])
         print(f"  Cache DB ready: {cache_store._DB_PATH}")
         clear_all_cache()
+
+        # Same background thumbnail-cache prune that startup runs when
+        # launched with --path (see initialize_runtime_configs) — this is
+        # the path most people actually hit, so it needs it too. Best-effort
+        # and non-blocking: worst case the cache just grows until the next
+        # successful prune.
+        def _prune_in_background():
+            try:
+                from gui_state import _build_valid_thumb_keys
+                cache_store.prune_stale_thumbs(_build_valid_thumb_keys())
+                cache_store.prune_thumbnail_cache_by_count()
+            except Exception:
+                pass
+        threading.Thread(target=_prune_in_background, daemon=True).start()
+
         return {"status": "success", "path": chosen}
     return {"status": "cancelled"}
 

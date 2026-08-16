@@ -53,6 +53,7 @@ window.currentPreviewFidx = 0;
 let dupCurrentPage = 0;
 let dupTotalPages = 1;
 let dupTotalGroups = 0;
+let dupNameFilter = "";
 
 // Global Loader Wrappers
 window.showLoader = function(msg = "Processing...") {
@@ -234,7 +235,44 @@ document.addEventListener("DOMContentLoaded", () => {
     initAdminAndRenameHandlers();
     initInteractivityHandlers();
     initCategoryHandlers();
+    initSearchHandlers();
+    initPerformanceHandlers();
+    initIdleAutoScan();
+    initSidebarToggle();
 });
+
+// ---------------------------------------------------------------------------
+// Retractable sidebar — state persisted in localStorage (a plain desktop
+// Chrome window via Eel, not the claude.ai artifact sandbox that restricts
+// browser storage, so this is fine here).
+// ---------------------------------------------------------------------------
+function initSidebarToggle() {
+    const sidebar = document.getElementById("app-sidebar");
+    const btn = document.getElementById("sidebar-toggle-btn");
+    if (!sidebar || !btn) return;
+
+    let collapsed = false;
+    try {
+        collapsed = localStorage.getItem("sidebarCollapsed") === "true";
+    } catch (e) {
+        // localStorage can throw in rare sandboxed contexts — fail open
+        // (sidebar stays expanded) rather than break the toggle entirely.
+    }
+    if (collapsed) {
+        sidebar.classList.add("collapsed");
+        btn.classList.add("collapsed");
+        btn.title = "Expand sidebar";
+    }
+
+    btn.addEventListener("click", () => {
+        const isCollapsed = sidebar.classList.toggle("collapsed");
+        btn.classList.toggle("collapsed", isCollapsed);
+        btn.title = isCollapsed ? "Expand sidebar" : "Collapse sidebar";
+        try {
+            localStorage.setItem("sidebarCollapsed", isCollapsed ? "true" : "false");
+        } catch (e) { /* non-fatal */ }
+    });
+}
 
 function initViewPanelNavigation() {
     const navButtons = document.querySelectorAll(".nav-btn");
@@ -366,6 +404,7 @@ function unlockAdminUI() {
     if(renWork) renWork.style.display = "block";
     
     populateRenameCategories();
+    populatePerformanceSettings();
 }
 
 async function populateRenameCategories() {
@@ -384,6 +423,44 @@ async function populateRenameCategories() {
             if (idx === 0) currentRenameCategory = c.name; 
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Admin — Performance settings (Low/Medium/High scan worker threads)
+// ---------------------------------------------------------------------------
+async function populatePerformanceSettings() {
+    const res = await eel.get_worker_settings()();
+    document.getElementById("perf-cpu-count").innerText = res.cpu_count;
+    document.querySelectorAll(".worker-tier-count").forEach(el => {
+        const t = el.getAttribute("data-tier");
+        el.innerText = `(${res.tiers[t]})`;
+    });
+    document.querySelectorAll(".worker-tier-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.getAttribute("data-tier") === res.current_tier);
+    });
+    const label = document.getElementById("perf-current-label");
+    if (res.current_tier) {
+        label.innerText = `Current: ${res.current_tier} (${res.current_max_workers} thread(s))`;
+    } else if (res.current_max_workers) {
+        label.innerText = `Current: custom (${res.current_max_workers} thread(s))`;
+    } else {
+        label.innerText = `Current: auto (${Math.max(1, res.cpu_count - 1)} thread(s))`;
+    }
+}
+
+function initPerformanceHandlers() {
+    document.querySelectorAll(".worker-tier-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const tier = btn.getAttribute("data-tier");
+            const res = await eel.set_worker_tier(tier)();
+            if (res.status === "success") {
+                showToast(`Scan workers set to ${tier} (${res.max_workers} thread(s), ${res.cpu_count} cores detected).`, "success");
+                populatePerformanceSettings();
+            } else {
+                showToast(res.message || "Failed to update worker setting.", "error");
+            }
+        });
+    });
 }
 
 function initCategoryHandlers() {
@@ -590,6 +667,7 @@ async function refreshDashboardTelemetryMetrics() {
                 checklistContainer.appendChild(row);
             });
         }
+        _applyOrganizeSearchFilter();
     }
 
     // 6. Rule Previews
@@ -624,6 +702,7 @@ async function refreshDashboardTelemetryMetrics() {
                 historyBody.appendChild(tr);
             });
         }
+        _applyHistorySearchFilter();
     }
 
     const trashBody = document.getElementById("trash-table-body");
@@ -643,6 +722,7 @@ async function refreshDashboardTelemetryMetrics() {
                 trashBody.appendChild(tr);
             });
         }
+        _applyBinSearchFilter();
     }
 
     // --- DUPLICATES (PAGINATED + LAZY THUMBNAILS) ---
@@ -660,7 +740,7 @@ async function refreshDashboardTelemetryMetrics() {
         // already works — the rest of the UI stays fully interactive while
         // it runs, with real progress on the inline bar instead of a
         // full-screen loader.
-        const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
+        const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage, 25, dupNameFilter)();
         const isCached = dupResponse.from_cache === true;
 
         if (dupResponse.needs_scan === true) {
@@ -797,6 +877,88 @@ async function refreshDashboardTelemetryMetrics() {
         }
         window.hideLoader();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Search bars (Phase 3) — every tab except the admin ones (Categories, Rename).
+// Overview has no listable content (just a chart + stat cards) so it's
+// intentionally skipped. Organize/History/Bin filter client-side over
+// already-rendered rows; Duplicates/Gallery go through the backend since
+// those are server-paginated and a client-side filter would only ever see
+// the current page.
+// ---------------------------------------------------------------------------
+let organizeSearchQuery = "";
+let historySearchQuery = "";
+let binSearchQuery = "";
+
+function _debounce(fn, delayMs) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delayMs);
+    };
+}
+
+function _applyOrganizeSearchFilter() {
+    const q = organizeSearchQuery.trim().toLowerCase();
+    document.querySelectorAll("#organize-checklist-container > div").forEach(row => {
+        row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+    });
+}
+
+function _applyHistorySearchFilter() {
+    const q = historySearchQuery.trim().toLowerCase();
+    document.querySelectorAll("#history-table-body tr").forEach(row => {
+        row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+    });
+}
+
+function _applyBinSearchFilter() {
+    const q = binSearchQuery.trim().toLowerCase();
+    document.querySelectorAll("#trash-table-body tr").forEach(row => {
+        row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+    });
+}
+
+function initSearchHandlers() {
+    document.getElementById("organize-search-input").addEventListener("input", (e) => {
+        organizeSearchQuery = e.target.value;
+        _applyOrganizeSearchFilter();
+    });
+
+    document.getElementById("history-search-input").addEventListener("input", (e) => {
+        historySearchQuery = e.target.value;
+        _applyHistorySearchFilter();
+    });
+
+    document.getElementById("bin-search-input").addEventListener("input", (e) => {
+        binSearchQuery = e.target.value;
+        _applyBinSearchFilter();
+    });
+
+    // Duplicates and Gallery are server-paginated — debounce so we don't fire
+    // a request on every keystroke, and reset to page 0 since the filtered
+    // result set is a different size than the unfiltered one.
+    const debouncedDupSearch = _debounce(async (value) => {
+        dupNameFilter = value;
+        dupCurrentPage = 0;
+        await refreshDashboardTelemetryMetrics();
+    }, 350);
+    document.getElementById("duplicates-search-input").addEventListener("input", (e) => {
+        debouncedDupSearch(e.target.value);
+    });
+
+    const debouncedGallerySearch = _debounce(async (value) => {
+        galleryNameFilter = value;
+        if (galleryOnlySimilarActive) {
+            _renderOnlySimilarView();
+        } else {
+            await loadGalleryPage(0);
+        }
+    }, 350);
+    document.getElementById("gallery-search-input").addEventListener("input", (e) => {
+        debouncedGallerySearch(e.target.value);
+    });
 }
 
 function initInteractivityHandlers() {
@@ -1616,7 +1778,7 @@ document.getElementById("dup-jump-input").addEventListener("keydown", async (e) 
 
 window._loadDuplicatePage = async function() {
     const thresholdVal = 10; // similar-image scanning moved to Gallery; Duplicates is exact-only now
-    const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage)();
+    const dupResponse = await eel.get_duplicate_groups_data(activeScanType, thresholdVal, dupCurrentPage, 25, dupNameFilter)();
     
     const dupGroups = dupResponse.displayed_groups || [];
     window.currentDuplicateGroups = dupGroups;
@@ -1705,6 +1867,7 @@ let galleryOnlySimilarAllItems = [];
 let galleryOnlySimilarPage = 0;
 const GALLERY_PAGE_SIZE = 60;
 let gallerySelectedPaths = new Set();
+let galleryNameFilter = "";
 
 window.currentGalleryPageItems = [];
 window.galleryPreviewIndex = 0;
@@ -1750,7 +1913,7 @@ async function loadGalleryPage(page) {
         return;
     }
 
-    const res = await eel.get_gallery_page(galleryCurrentFolder, page, GALLERY_PAGE_SIZE, gallerySortBy, gallerySortDesc)();
+    const res = await eel.get_gallery_page(galleryCurrentFolder, page, GALLERY_PAGE_SIZE, gallerySortBy, gallerySortDesc, galleryNameFilter)();
     galleryCurrentPage = res.page;
     galleryTotalPages = res.total_pages;
     _updateGalleryPagination(res.total, res.total_pages, res.page);
@@ -1915,6 +2078,10 @@ function _renderOnlySimilarView() {
         const known = window.currentGalleryPageItems.find(i => i.path === p);
         return known || { path: p, name: p.split(/[\\/]/).pop(), folder: "" };
     });
+    if (galleryNameFilter.trim()) {
+        const nf = galleryNameFilter.trim().toLowerCase();
+        items = items.filter(i => i.name.toLowerCase().includes(nf));
+    }
     items = _clientSortGalleryItems(items);
     galleryOnlySimilarAllItems = items;
     galleryOnlySimilarPage = 0;
@@ -1962,6 +2129,103 @@ async function _refreshGallerySimilarityMap() {
         _renderOnlySimilarView();
     } else {
         _applyGallerySimilarityBadges();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idle-triggered background similar-image scan (Phase 3, #5)
+//
+// This is an IN-APP idle proxy, not true OS-level idle detection — it tracks
+// mouse/keyboard/scroll activity within this window only. That's a
+// deliberate, honest trade-off: real system idle detection needs a native
+// dependency this app doesn't otherwise require. If the person is idle in
+// this app but actively doing something else on their machine, this can
+// still fire — the CPU cap (2 cores, see start_idle_similar_scan in
+// gui_duplicates.py) and the "don't fire while anything else is running"
+// checks below exist specifically to keep that acceptable.
+// ---------------------------------------------------------------------------
+let _lastActivityTime = Date.now();
+let _idleScanFired = false;
+let idleAutoScanEnabled = true;
+const IDLE_THRESHOLD_MS = 90 * 1000;   // consider "idle" after 90s of no input
+const IDLE_CHECK_INTERVAL_MS = 15 * 1000;
+const IDLE_SCAN_THRESHOLDS = [5, 10, 16]; // Strict, Normal, Loose — see SIMILARITY_PRESETS
+
+["mousemove", "mousedown", "keydown", "scroll", "click", "touchstart"].forEach(evt => {
+    document.addEventListener(evt, () => {
+        _lastActivityTime = Date.now();
+        _idleScanFired = false; // a fresh idle period can trigger again later
+    }, { passive: true });
+});
+
+function initIdleAutoScan() {
+    const toggle = document.getElementById("gallery-idle-autoscan-toggle");
+    if (toggle) {
+        idleAutoScanEnabled = toggle.checked;
+        toggle.addEventListener("change", (e) => {
+            idleAutoScanEnabled = e.target.checked;
+        });
+    }
+
+    setInterval(async () => {
+        if (!idleAutoScanEnabled || _idleScanFired) return;
+        if (typeof eel === "undefined") return;
+        if (Date.now() - _lastActivityTime < IDLE_THRESHOLD_MS) return;
+
+        // Don't compete with anything already using the CPU or the UI thread.
+        const loaderVisible = document.getElementById("global-loader").style.display !== "none";
+        if (loaderVisible) return;
+
+        const metadata = await eel.get_system_metadata()();
+        if (!metadata.folder) return;
+
+        const status = await eel.get_similar_scan_status()();
+        if (status.scanning) return; // a foreground/manual scan is already running
+
+        _idleScanFired = true; // don't re-trigger the cycle again this same idle stretch
+        await _runIdleScanCycle();
+    }, IDLE_CHECK_INTERVAL_MS);
+}
+
+// Cycles Strict/Normal/Loose sequentially — the backend only runs one
+// background scan thread at a time, so firing all three at once would just
+// make start_idle_similar_scan() no-op on the 2nd and 3rd with
+// {"status": "scanning"}. Each already-disk-cached threshold (see Phase 2's
+// scan_results table) resolves in milliseconds via find_similar_images()'s
+// own internal signature check, so only genuinely uncached thresholds take
+// real time. Bails immediately, mid-cycle, the moment the user comes back.
+async function _runIdleScanCycle() {
+    for (const threshold of IDLE_SCAN_THRESHOLDS) {
+        if (Date.now() - _lastActivityTime < IDLE_THRESHOLD_MS) {
+            console.log("[idle-scan] Activity detected — stopping idle cycle.");
+            return;
+        }
+        if (!idleAutoScanEnabled) return;
+
+        const status = await eel.get_similar_scan_status()();
+        if (status.scanning) return; // don't pile onto a scan started elsewhere
+
+        console.log(`[idle-scan] Warming threshold ${threshold} (capped to 2 cores)...`);
+        const res = await eel.start_idle_similar_scan(threshold)();
+
+        if (res.status === "started") {
+            // Wait for this threshold to actually finish before moving on.
+            for (let i = 0; i < 300; i++) { // ~2.5 min safety cap per threshold
+                if (Date.now() - _lastActivityTime < IDLE_THRESHOLD_MS) return;
+                const s = await eel.get_similar_scan_status()();
+                if (!s.scanning) break;
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+        // "cached": already warm on disk — start_idle_similar_scan() returned
+        // instantly, nothing to wait for; move straight to the next threshold.
+    }
+    console.log("[idle-scan] Idle cycle complete — Strict/Normal/Loose all pre-cached.");
+    // If the person is sitting on the Gallery tab right now, refresh the
+    // badge overlay so the newly-warmed thresholds are reflected without
+    // needing to touch anything.
+    if (document.getElementById("gallery-panel").classList.contains("active-view")) {
+        await _refreshGallerySimilarityMap();
     }
 }
 

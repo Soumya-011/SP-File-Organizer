@@ -37,6 +37,38 @@ body {
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
+    overflow: hidden;
+    transition: width 0.25s ease, min-width 0.25s ease;
+}
+
+.sidebar.collapsed {
+    width: 0;
+    min-width: 0;
+}
+
+.sidebar-toggle-btn {
+    position: fixed;
+    top: 20px;
+    left: 216px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--slate-surface);
+    border: 2px solid var(--space-bg);
+    color: #F3F4F6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 1000;
+    padding: 0;
+    transition: left 0.25s ease, transform 0.25s ease, background 0.15s ease;
+}
+.sidebar-toggle-btn svg { width: 15px; height: 15px; }
+.sidebar-toggle-btn:hover { background: var(--accent-blue); }
+.sidebar-toggle-btn.collapsed {
+    left: 6px;
+    transform: rotate(180deg);
 }
 
 .brand-header {
@@ -907,4 +939,30 @@ body {
 .ui-btn.danger:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* Search bars (Phase 3) */
+.search-input {
+    width: 100%;
+    max-width: 360px;
+    padding: 8px 12px;
+    margin-bottom: 14px;
+    border: 1px solid var(--stroke-color);
+    border-radius: 8px;
+    font-size: 13px;
+    outline: none;
+    font-family: var(--font-stack);
+    color: var(--text-primary);
+    background: var(--canvas-card);
+}
+.search-input:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+/* Admin — worker tier buttons */
+.worker-tier-btn.active {
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    color: #fff;
 }

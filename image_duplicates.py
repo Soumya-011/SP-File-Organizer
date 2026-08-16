@@ -24,34 +24,66 @@ comparison instead of Python list/loop.
 PERFORMANCE (#4): Hash results are cached to SQLite via cache_store.py,
 so unchanged images skip rehashing on subsequent sessions.
 
-PERFORMANCE (#5b — LSH): Grouping uses LSH banding on the 64-bit dHash
-instead of exhaustive O(n^2) pairwise comparison. For 50K images this
-reduces grouping from ~1.25 billion comparisons to roughly O(n * k)
-where k = number of bands. Trade-off: slight recall loss at the boundary
-(\u22441-3% of true matches may be missed at the default threshold of 10
-when differing bits spread unlucky across all 4 bands). This is the
-standard acceptable trade-off used in production perceptual dedup systems.
+PERFORMANCE (app-lighter): Pillow and numpy are now imported LAZILY (first
+actual use) rather than at module load. gui.py imports every endpoint
+module unconditionally at startup to register their @eel.expose handlers —
+without this, both libraries (~19 MB combined, measured) would load into
+every session's memory even when similar-image detection is never touched
+that session. Both are used exclusively within _perceptual_hash() and
+find_similar_images(), so deferring them costs nothing on the actual
+scanning path — see _ensure_pil()/_ensure_numpy() below.
 """
 
 from pathlib import Path
 from collections import defaultdict
-
-import numpy as np
 
 from utils import concurrent_hash_all, format_size
 from menus import confirm_dry_run_then_execute
 from duplicates import move_to_trash
 from undo import save_run_log
 
-try:
-    from PIL import Image
-    PIL_AVAILABLE = True
+_PIL_Image = None
+_PIL_AVAILABLE = None
+_RESAMPLE = None
+
+
+def _ensure_pil():
+    """Import Pillow on first use only. Returns True if available. Pillow
+    has always been a genuinely optional dependency here (see the
+    PIL_AVAILABLE-style checks throughout) — this just defers paying for it
+    until it's actually needed instead of on every app launch."""
+    global _PIL_Image, _PIL_AVAILABLE, _RESAMPLE
+    if _PIL_AVAILABLE is not None:
+        return _PIL_AVAILABLE
     try:
-        _RESAMPLE = Image.Resampling.LANCZOS  # Pillow >= 9.1
-    except AttributeError:
-        _RESAMPLE = Image.LANCZOS  # older Pillow
-except ImportError:
-    PIL_AVAILABLE = False
+        from PIL import Image
+        _PIL_Image = Image
+        try:
+            _RESAMPLE = Image.Resampling.LANCZOS  # Pillow >= 9.1
+        except AttributeError:
+            _RESAMPLE = Image.LANCZOS  # older Pillow
+        _PIL_AVAILABLE = True
+    except ImportError:
+        _PIL_AVAILABLE = False
+    return _PIL_AVAILABLE
+
+
+_np = None
+_POPCOUNT_TABLE = None
+
+
+def _ensure_numpy():
+    """Import numpy on first use only, and build the popcount lookup table
+    at that point too (it depends on numpy, so it can't be built at module
+    load either without forcing the eager import back in)."""
+    global _np, _POPCOUNT_TABLE
+    if _np is not None:
+        return _np
+    import numpy as np
+    _np = np
+    _POPCOUNT_TABLE = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
+    return _np
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif", ".heic"}
 
@@ -85,7 +117,8 @@ def _perceptual_hash(path: Path) -> int:
     bit (row*8 + col) corresponds to diff[row, col].
     Outputs are byte-identical so existing cached hashes remain valid.
     """
-    with Image.open(path) as img:
+    np = _ensure_numpy()
+    with _PIL_Image.open(path) as img:
         img = img.convert("L").resize((9, 8), _RESAMPLE)
         pixels = np.array(img.getdata(), dtype=np.uint8)
         grid = pixels.reshape(8, 9)
@@ -98,11 +131,6 @@ def _perceptual_hash(path: Path) -> int:
 
 def hamming_distance(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
-
-
-# Pre-computed popcount lookup table for all byte values 0-255.
-# Used by the vectorized hamming distance to avoid per-bit Python loops.
-_POPCOUNT_TABLE = np.array([bin(i).count('1') for i in range(256)], dtype=np.uint8)
 
 
 class _DisjointSet:
@@ -190,13 +218,19 @@ def find_similar_images(files: list, threshold: int = 10, max_workers: int = Non
         progress_callback: optional callable(pct, message, done, total).
             pct is 0-100. Called during hashing and grouping phases.
     """
-    if not PIL_AVAILABLE:
+    if not _ensure_pil():
         return [], [], True
 
     # 1. Filter out non-images
     images = [f for f in files if is_image_file(f)]
     if not images:
         return [], [], False
+
+    # Ensure numpy (and _POPCOUNT_TABLE, which depends on it) is loaded
+    # before any of the array code below runs — including the case where
+    # every image hits the hash cache and _perceptual_hash() (which also
+    # calls _ensure_numpy()) never actually runs this session.
+    np = _ensure_numpy()
 
     # PERFORMANCE (Phase 2): coarse result-level cache, checked before any
     # hashing happens.
@@ -384,7 +418,7 @@ def review_similar_image_selection(groups: list) -> list:
                 size_label = "unknown size"
             dims_label = ""
             try:
-                with Image.open(f) as img:
+                with _PIL_Image.open(f) as img:
                     dims_label = f"  {img.width}x{img.height}"
             except Exception:
                 pass

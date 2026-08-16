@@ -6,6 +6,7 @@ paginated group loading, lazy thumbnail batches, and background scanning.
 
 import threading
 import time
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import eel
@@ -25,13 +26,20 @@ from pathlib import Path
 from undo import save_run_log
 
 
-def _run_similar_scan_background(threshold):
+def _run_similar_scan_background(threshold, max_workers_override=None):
     """Run similar image scan in a background thread.
 
     This is the ONLY way similar-image detection is triggered from the GUI.
     It runs in a daemon thread so the Eel event loop stays responsive.
     Progress updates are pushed to the frontend via eel._on_similar_scan_progress().
     When done, it pushes results via eel._on_similar_scan_complete().
+
+    max_workers_override: if given, used INSTEAD of APP_STATE["max_scan_workers"].
+    Used exclusively by the idle-triggered background scan (see
+    start_idle_similar_scan below), which must stay hard-capped to 1-2 cores
+    no matter what worker tier the admin has configured for scans the user is
+    actively waiting on — idle work should never compete noticeably with
+    whatever the user does next if they come back mid-scan.
     """
     _last_progress_time = [0.0]  # mutable for closure
 
@@ -51,13 +59,15 @@ def _run_similar_scan_background(threshold):
         except Exception:
             pass
 
+    effective_workers = max_workers_override if max_workers_override is not None else APP_STATE.get("max_scan_workers")
+
     try:
         all_files, _, _ = get_cached_scans()
         groups, unreadable, unavailable = find_similar_images(
             all_files, 
             threshold=threshold, 
             progress_callback=_progress,
-            max_workers=APP_STATE.get("max_scan_workers"),
+            max_workers=effective_workers,
             size_cache=APP_STATE.get("cached_size_cache"),
         )
 
@@ -225,6 +235,38 @@ def start_similar_scan(hamming_threshold=10):
 
 
 @eel.expose
+def start_idle_similar_scan(hamming_threshold=10):
+    """Same as start_similar_scan(), but hard-caps worker threads to 2
+    (never more, regardless of the admin's configured worker tier — see
+    gui_admin.set_worker_tier). The frontend calls this only after detecting
+    the user has been idle for a while, as a low-priority background pass so
+    similar-image results are ready by the time they check the Gallery, without
+    ever competing noticeably with whatever they do next if they come back
+    mid-scan.
+    """
+    threshold = int(hamming_threshold)
+
+    with _STATE_LOCK:
+        if (APP_STATE.get("cached_similar") is not None
+                and APP_STATE.get("cached_similar_threshold") == threshold):
+            return {"status": "cached", "total_groups": len(APP_STATE["cached_similar"])}
+        if APP_STATE.get("_similar_scan_running", False):
+            return {"status": "scanning"}
+        capped_workers = min(2, os.cpu_count() or 2)
+        APP_STATE["_similar_scan_running"] = True
+        t = threading.Thread(
+            target=_run_similar_scan_background,
+            args=(threshold,),
+            kwargs={"max_workers_override": capped_workers},
+            daemon=True,
+        )
+        APP_STATE["_similar_scan_thread"] = t
+    t.start()
+
+    return {"status": "started", "capped_workers": min(2, os.cpu_count() or 2)}
+
+
+@eel.expose
 def _on_similar_scan_complete(result):
     pass  # placeholder; JS side receives the call
 
@@ -235,11 +277,18 @@ def _on_similar_scan_progress(data):
 
 
 @eel.expose
-def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, page_size=25):
+def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, page_size=25, name_filter=None):
     """Paginated duplicate groups — loads one page at a time.
 
     Thumbnails are NOT generated here. The frontend calls
     get_thumbnails_for_group() on-demand when a group is expanded.
+
+    name_filter: optional substring (case-insensitive) — only groups
+    containing at least one file whose name matches are returned. Filtering
+    happens BEFORE pagination but preserves each group's original index into
+    the full cached list (its "id" in the response), since
+    get_thumbnails_for_page() and purge_selected_duplicates() both key off
+    that index against the unfiltered APP_STATE cache.
     """
     folder = APP_STATE["folder"]
     if not folder or not folder.is_dir():
@@ -279,18 +328,24 @@ def get_duplicate_groups_data(scan_type="exact", hamming_threshold=10, page=0, p
                 groups = []
                 needs_scan = True
 
-    total_groups = len(groups)
+    indexed_groups = list(enumerate(groups))
+    if name_filter:
+        nf = name_filter.strip().lower()
+        if nf:
+            indexed_groups = [(i, g) for i, g in indexed_groups if any(nf in f.name.lower() for f in g)]
+
+    total_groups = len(indexed_groups)
     total_pages = max(1, (total_groups + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = min(start + page_size, total_groups)
-    limited_groups = groups[start:end]
+    limited_groups = indexed_groups[start:end]
 
     APP_STATE["dup_page"] = page
     APP_STATE["dup_page_size"] = page_size
 
     formatted_groups = []
-    for idx, group in enumerate(limited_groups, start=start):
+    for idx, group in limited_groups:
         try:
             size_str = format_size(group[0].stat().st_size)
         except OSError:

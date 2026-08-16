@@ -17,6 +17,7 @@ register their @eel.expose handlers), and launches the window.
 """
 
 import eel
+import platform
 
 # Initialize Eel web directory BEFORE importing endpoint modules,
 # so @eel.expose decorators can register properly.
@@ -36,7 +37,30 @@ import gui_folders     # select_folder_native, add_comparison_folder, etc.
 
 def launch_gui(config_path, initial_folder=None):
     gui_state.initialize_runtime_configs(config_path, initial_folder)
+
+    # PERFORMANCE (app-lighter, tier 3): on Windows, prefer 'edge' mode,
+    # which reuses the OS's built-in WebView2 runtime instead of spawning a
+    # separate Chrome process — meaningfully lower memory footprint on
+    # machines that have it (virtually all Windows 10/11 installs by
+    # default; WebView2 has shipped inbox since the 2022 Windows 11 update
+    # and as a Windows Update component on Windows 10 since 2022). Falls
+    # back to 'chrome' automatically and silently if Edge/WebView2 isn't
+    # available, and is skipped entirely on non-Windows platforms where
+    # 'edge' mode doesn't apply. This cannot be verified from this
+    # environment — see the accompanying testing notes for how to confirm
+    # it on an actual Windows machine.
+    preferred_mode = 'edge' if platform.system() == 'Windows' else 'chrome'
+
     try:
-        eel.start('index.html', size=(1120, 820), mode='chrome')
+        eel.start('index.html', size=(1120, 820), mode=preferred_mode)
     except (SystemExit, MemoryError, KeyboardInterrupt):
         pass
+    except Exception as e:
+        if preferred_mode != 'chrome':
+            print(f"  Could not start in '{preferred_mode}' mode ({e}). Falling back to Chrome.")
+            try:
+                eel.start('index.html', size=(1120, 820), mode='chrome')
+            except (SystemExit, MemoryError, KeyboardInterrupt):
+                pass
+        else:
+            raise

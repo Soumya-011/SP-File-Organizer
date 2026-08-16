@@ -13,7 +13,10 @@
 </head>
 <body>
     <div class="app-shell">
-        <aside class="sidebar">
+        <button id="sidebar-toggle-btn" class="sidebar-toggle-btn" title="Collapse sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <aside class="sidebar" id="app-sidebar">
             <div class="brand-header">
                 <div class="brand-logo">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/></svg>
@@ -134,6 +137,7 @@
                                     <input type="checkbox" id="org-select-all" checked style="width: 14px; height: 14px;"> Select All
                                 </label>
                             </div>
+                            <input type="text" id="organize-search-input" class="search-input" placeholder="Search categories...">
                             <div class="checklist-box" id="organize-checklist-container"></div>
                             <button class="ui-btn primary" id="execute-organize-btn" style="margin-top: 16px;">Organize now</button>
                         </div>
@@ -190,6 +194,22 @@
                     </div>
 
                     <div id="categories-workspace-section" style="display: none;">
+                        <div class="ui-card" style="margin-bottom: 16px;">
+                            <h3 class="card-subtitle" style="margin:0 0 4px 0; color: var(--text-primary);">Performance — Scan Worker Threads</h3>
+                            <p style="font-size:12.5px; color:var(--text-secondary); margin:0 0 14px 0; line-height:1.5;">
+                                Controls how many files/images are hashed in parallel during Duplicate and
+                                Similar-Image scans. Detected CPU cores: <b id="perf-cpu-count">-</b>.
+                                Higher uses more of your CPU for faster scans; lower leaves more headroom
+                                for everything else while a scan runs. (The idle auto-scan in Gallery always
+                                stays capped to 2 cores regardless of this setting.)
+                            </p>
+                            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                                <button class="ui-btn secondary worker-tier-btn" data-tier="low">Low <span class="worker-tier-count" data-tier="low"></span></button>
+                                <button class="ui-btn secondary worker-tier-btn" data-tier="medium">Medium <span class="worker-tier-count" data-tier="medium"></span></button>
+                                <button class="ui-btn secondary worker-tier-btn" data-tier="high">High <span class="worker-tier-count" data-tier="high"></span></button>
+                                <span id="perf-current-label" style="font-size:12px; color:var(--text-secondary); margin-left:8px;"></span>
+                            </div>
+                        </div>
                         <div class="ui-card">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                                 <span style="font-size: 13px; color: var(--text-secondary);">Customize file extension mapping matrix:</span>
@@ -209,7 +229,7 @@
                     </p>
                     
                     <div class="ui-card">
-                        <div class="toolbar-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <div class="toolbar-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap:wrap; gap:10px;">
                             <span style="font-size: 13px; color: var(--text-secondary);">Review duplicates (Click image thumbnails for full preview):</span>
                             <div style="display: flex; align-items: center; gap: 16px;">
                                 <button class="ui-btn secondary" id="dup-rescan-btn" style="padding:5px 14px; font-size:12px;" title="Force a fresh scan (use if files were added/removed outside the app)">
@@ -224,6 +244,7 @@
                                 <button class="ui-btn danger" id="purge-duplicates-btn">Purge Checked Copies</button>
                             </div>
                         </div>
+                        <input type="text" id="duplicates-search-input" class="search-input" placeholder="Search by filename..." style="margin-bottom:16px;">
                         
                         <div id="dup-pagination-bar" style="display:none; justify-content:space-between; align-items:center; margin-bottom:14px; padding:10px 14px; background:var(--space-bg); border-radius:8px; border:1px solid var(--stroke-color); flex-wrap:wrap; gap:10px;">
                             <span id="dup-page-info" style="font-size:12px; color:var(--text-secondary);"></span>
@@ -283,7 +304,14 @@
                             <span style="width:1px; height:20px; background:var(--stroke-color); margin:0 4px;"></span>
 
                             <button class="ui-btn secondary" id="gallery-only-similar-btn" title="Show only images that are part of a similar-image group">Show Only Similar</button>
+
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); cursor:pointer; margin-left:auto;" title="When the app is idle for a while, quietly scan for similar images in the background (max 2 CPU cores)">
+                                <input type="checkbox" id="gallery-idle-autoscan-toggle" checked style="width:14px; height:14px;">
+                                Auto-scan when idle
+                            </label>
                         </div>
+
+                        <input type="text" id="gallery-search-input" class="search-input" placeholder="Search by filename..." style="margin-top:12px;">
 
                         <div id="gallery-scan-progress" style="display:none; margin-top:14px; padding:14px 18px; background:linear-gradient(135deg,#EFF6FF,#DBEAFE); border:1px solid #93C5FD; border-radius:10px;">
                             <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
@@ -377,6 +405,7 @@
                     <h1 class="view-title">Undo History logs</h1>
                     <div class="ui-card">
                         <h3 class="card-subtitle">Select a specific transaction batch to roll back filesystem adjustments</h3>
+                        <input type="text" id="history-search-input" class="search-input" placeholder="Search history...">
                         <div class="table-container">
                             <table style="width:100%; border-collapse:collapse; font-size:13px; text-align:left;">
                                 <thead style="border-bottom: 1px solid var(--stroke-color);"><tr><th style="padding:10px;">Execution Timestamp</th><th style="padding:10px;">Files/Folders Moved</th><th style="padding:10px;">Actions</th></tr></thead>
@@ -394,6 +423,7 @@
                             <button class="ui-btn primary" id="restore-bin-btn">Restore Selected items</button>
                             <button class="ui-btn danger" id="empty-bin-btn">Empty Trash Permanently</button>
                         </div>
+                        <input type="text" id="bin-search-input" class="search-input" placeholder="Search recycle bin...">
                         <div class="table-container">
                             <table style="width:100%; border-collapse:collapse; font-size:13px; text-align:left;">
                                 <thead style="border-bottom: 1px solid var(--stroke-color);">

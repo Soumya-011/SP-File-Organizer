@@ -286,6 +286,40 @@ def prune_stale_thumbs(valid_keys: set):
                 _safe_rollback(conn)
 
 
+def prune_thumbnail_cache_by_count(max_rows: int = 8000):
+    """Cap the thumbnail cache to at most max_rows entries, evicting the
+    OLDEST-inserted rows first (approximated via SQLite's implicit rowid,
+    which increases monotonically with insertion under normal use). This
+    isn't true LRU — re-viewing an old thumbnail doesn't refresh its
+    position — but it's a reasonable FIFO cap without a schema migration to
+    add a proper last-accessed column, and this cache is fully regenerable
+    (just costs a re-encode) so an imperfect eviction order is low-stakes.
+
+    prune_stale_thumbs() already removes entries for files that no longer
+    exist; this is a second, independent safety net so .cache_store.db
+    doesn't grow unbounded over months of use even when files stick around
+    (e.g. someone with a 50K-photo library who's opened Gallery on most of
+    it over time). At ~2-20 KB per base64 JPEG thumbnail depending on
+    variant, 8000 rows caps this table's contribution to roughly 16-160 MB.
+    """
+    with _DB_LOCK:
+        conn = None
+        try:
+            conn = _get_conn()
+            row = conn.execute("SELECT COUNT(*) FROM thumbnail_cache").fetchone()
+            total = row[0] if row else 0
+            if total > max_rows:
+                conn.execute(
+                    "DELETE FROM thumbnail_cache WHERE rowid NOT IN "
+                    "(SELECT rowid FROM thumbnail_cache ORDER BY rowid DESC LIMIT ?)",
+                    (max_rows,)
+                )
+                conn.commit()
+        except Exception:
+            if conn is not None:
+                _safe_rollback(conn)
+
+
 # ---------------------------------------------------------------------------
 # Hash cache (#4)
 #---------------------------------------------------------------------------

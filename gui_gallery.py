@@ -17,7 +17,7 @@ import eel
 
 import cache_store
 from image_duplicates import is_image_file
-from gui_state import APP_STATE, _STATE_LOCK, get_cached_scans
+from gui_state import APP_STATE, _STATE_LOCK, get_cached_scans, _state_set
 from gui_thumbnails import _generate_base64_thumb
 
 
@@ -63,10 +63,11 @@ def get_gallery_folders():
 
 
 @eel.expose
-def get_gallery_page(folder_filter=None, page=0, page_size=60, sort_by="name", sort_desc=False):
+def get_gallery_page(folder_filter=None, page=0, page_size=60, sort_by="name", sort_desc=False, name_filter=None):
     """Paginated image list, optionally scoped to one folder.
 
     sort_by: "name" (natural sort — 1,2,...,10, not 1,10,...,2), "size", or "date".
+    name_filter: optional substring (case-insensitive) matched against filename.
     No thumbnails here — the frontend calls get_gallery_thumbnails() for the
     visible page on demand.
     """
@@ -74,6 +75,10 @@ def get_gallery_page(folder_filter=None, page=0, page_size=60, sort_by="name", s
     images = [f for f in all_files if is_image_file(f)]
     if folder_filter:
         images = [f for f in images if str(f.parent) == folder_filter]
+    if name_filter:
+        nf = name_filter.strip().lower()
+        if nf:
+            images = [f for f in images if nf in f.name.lower()]
 
     with _STATE_LOCK:
         size_lookup = APP_STATE.get("cached_size_cache")
@@ -147,7 +152,18 @@ def get_gallery_similarity_map(hamming_threshold=10):
     """{ready, scanning, map: {path: group_id}, group_count}. Read-only — never
     triggers a scan itself. The frontend calls eel.start_similar_scan() (already
     exposed in gui_duplicates.py) to kick one off, then polls/listens for
-    _on_similar_scan_complete before calling this again."""
+    _on_similar_scan_complete before calling this again.
+
+    APP_STATE only holds ONE threshold's results in memory at a time (the
+    last one scanned) — but the persistent disk cache (cache_store's
+    scan_results table, see duplicates/image_duplicates find_*()) holds all
+    three thresholds simultaneously once each has been scanned at least
+    once. Without checking disk here too, switching the Gallery similarity
+    dropdown to a threshold the idle background scanner already pre-warmed
+    on disk would incorrectly report "not scanned yet" just because a
+    *different* threshold happens to be the one currently loaded into the
+    single in-memory slot.
+    """
     threshold = int(hamming_threshold)
     with _STATE_LOCK:
         groups = APP_STATE.get("cached_similar")
@@ -156,9 +172,37 @@ def get_gallery_similarity_map(hamming_threshold=10):
 
     if scanning:
         return {"ready": False, "scanning": True, "map": {}, "group_count": 0}
-    if groups is None or cached_threshold != threshold:
-        return {"ready": False, "scanning": False, "map": {}, "group_count": 0}
 
+    if groups is not None and cached_threshold == threshold:
+        return _build_similarity_response(groups)
+
+    # Not the currently-loaded in-memory threshold — check the persistent
+    # disk cache before reporting "not scanned".
+    try:
+        if cache_store._DB_PATH is not None:
+            all_files, _, _ = get_cached_scans()
+            images = [f for f in all_files if is_image_file(f)]
+            signature = cache_store.compute_scan_signature(images, size_cache=APP_STATE.get("cached_size_cache"))
+            cached = cache_store.get_cached_scan_result(f"similar_images_{threshold}", signature)
+            if cached is not None:
+                groups_paths, unreadable_count = cached
+                disk_groups = [[Path(p) for p in g] for g in groups_paths]
+                # Refresh the in-memory slot too, so the very next call for
+                # this same threshold doesn't need to hit disk again.
+                _state_set(
+                    cached_similar=disk_groups,
+                    cached_similar_threshold=threshold,
+                    cached_similar_unreadable=unreadable_count,
+                    cached_similar_unavailable=False,
+                )
+                return _build_similarity_response(disk_groups)
+    except Exception:
+        pass
+
+    return {"ready": False, "scanning": False, "map": {}, "group_count": 0}
+
+
+def _build_similarity_response(groups):
     mapping = {}
     for gid, group in enumerate(groups):
         for f in group:

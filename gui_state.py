@@ -333,6 +333,7 @@ def initialize_runtime_configs(config_path: Path, initial_folder: Path = None):
         def _prune_in_background():
             try:
                 cache_store.prune_stale_thumbs(_build_valid_thumb_keys())
+                cache_store.prune_thumbnail_cache_by_count()
             except Exception:
                 pass
         threading.Thread(target=_prune_in_background, daemon=True).start()

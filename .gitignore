@@ -1,0 +1,20 @@
+# Build artifacts from PyInstaller
+build/
+dist/
+tests/
+*ini
+conftest.py
+*.spec
+
+# Virtual Environments
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+.pytest_cache
+
+# IDEs and OS junk
+.vscode/
+.DS_Store
